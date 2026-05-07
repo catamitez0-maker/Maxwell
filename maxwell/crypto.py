@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 from typing import NamedTuple
 
-import hashlib
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
