@@ -6,7 +6,7 @@
 
 ```bash
 # Clone & setup
-git clone https://github.com/YOUR_USERNAME/Maxwell.git
+git clone https://github.com/catamitez0-maker/Maxwell.git
 cd Maxwell
 python3 -m venv .venv
 source .venv/bin/activate
