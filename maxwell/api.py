@@ -15,6 +15,8 @@ import logging
 import time
 
 import aiohttp
+from collections.abc import Awaitable, Callable
+
 from aiohttp import web
 
 from .models import Task
@@ -29,6 +31,25 @@ _task_counter = itertools.count()
 
 def _next_task_id() -> int:
     return time.time_ns() + next(_task_counter)
+
+
+@web.middleware
+async def cors_middleware(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> web.StreamResponse:
+    if request.method == "OPTIONS":
+        response = web.Response()
+    else:
+        try:
+            response = await handler(request)
+        except web.HTTPException as ex:
+            response = ex
+
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Maxwell-Signature, Upgrade"
+
+    if isinstance(response, web.HTTPException):
+        raise response
+    return response
 
 
 class MaxwellServer:
@@ -171,11 +192,23 @@ class MaxwellServer:
         return web.Response(text=content, content_type="text/html")
 
     async def start(self) -> None:
-        app = web.Application()
+        app = web.Application(middlewares=[cors_middleware])
+
+        async def handle_options(_request: web.Request) -> web.Response:
+            return web.Response()
+
+        app.router.add_options("/v1/proxy", handle_options)
         app.router.add_post("/v1/proxy", self.handle_proxy)
+
+        app.router.add_options("/healthz", handle_options)
         app.router.add_get("/healthz", self.handle_health)
+
+        app.router.add_options("/v1/stats", handle_options)
         app.router.add_get("/v1/stats", self.handle_stats)
+
+        app.router.add_options("/dashboard", handle_options)
         app.router.add_get("/dashboard", self.handle_dashboard)
+
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)
