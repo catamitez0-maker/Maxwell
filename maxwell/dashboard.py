@@ -21,7 +21,7 @@ def _pct(part: int, total: int) -> str:
     return f"{part / total * 100:.1f}%"
 
 
-def create_dashboard(stats: FunnelStats, output_q_size: int) -> Table:
+def create_dashboard(stats: FunnelStats) -> Table:
     """Build a Rich table showing live funnel metrics."""
     table = Table(
         show_header=True,
@@ -93,7 +93,7 @@ def create_dashboard(stats: FunnelStats, output_q_size: int) -> Table:
         "  Entropy Threshold", f"[{stats.entropy_low:.1f}, {stats.entropy_high:.1f}]",
         "", style="magenta",
     )
-    table.add_row("  Output Queue", f"{output_q_size}", "")
+    table.add_row("  Active Streams", f"{stats.active_streams}", "")
     table.add_row("  Uptime", f"{stats.uptime:.1f}s", "", style="dim")
 
     return table

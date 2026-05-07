@@ -59,18 +59,19 @@ class MaxwellServer:
         signature: str = request.headers.get("X-Maxwell-Signature", "")
         task = Task(id=_next_task_id(), payload=payload, signature=signature)
 
+        response = web.StreamResponse()
+        response.content_type = "text/plain"
+        await response.prepare(request)
+        
         try:
-            await asyncio.wait_for(
-                self.proxy.input_queue.put(task), timeout=self.queue_timeout,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Queue full — rejecting task %d", task.id)
-            return web.json_response(
-                {"error": "service overloaded, retry later"}, status=503,
-            )
-
-        self.proxy.stats.total_requests += 1
-        return web.json_response({"status": "received", "task_id": task.id})
+            async for chunk in self.proxy.process_stream(task):
+                await response.write(chunk.encode("utf-8"))
+        except Exception as e:
+            logger.error("Streaming error: %s", e)
+            await response.write(f"\n<Error: {e}>".encode("utf-8"))
+            
+        await response.write(b"\n")
+        return response
 
     async def handle_health(self, _request: web.Request) -> web.Response:
         stats = self.proxy.stats

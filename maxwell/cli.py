@@ -9,7 +9,6 @@ import logging
 import os
 import random
 import signal
-import time
 
 import typer
 from rich.console import Console
@@ -110,12 +109,12 @@ async def _run(
         ))
 
     with Live(
-        create_dashboard(stats, 0),
+        create_dashboard(stats),
         refresh_per_second=4,
         console=console,
     ) as live:
         while proxy.is_running:
-            live.update(create_dashboard(stats, proxy.output_queue.qsize()))
+            live.update(create_dashboard(stats))
             await asyncio.sleep(0.25)
 
     console.print("\n[yellow]Shutting down…[/yellow]")
@@ -144,14 +143,23 @@ async def _simulate_producer(proxy: PruningProxy, rate: float) -> None:
         "abcabcabcabcabcabcabcabcabcabcabcabc",
         "looploop" * 10,
     ]
+    async def _run_stream(task: Task):
+        try:
+            async for _ in proxy.process_stream(task):
+                pass
+        except Exception:
+            pass
+
     task_id = 0
     while proxy.is_running:
         payload = random.choice(samples)
         task = Task(id=task_id, payload=payload)
-        try:
-            await asyncio.wait_for(proxy.input_queue.put(task), timeout=0.1)
-            proxy.stats.total_requests += 1
-            task_id += 1
-        except asyncio.TimeoutError:
-            pass
+        proxy.stats.total_requests += 1
+        task_id += 1
+        
+        asyncio.create_task(_run_stream(task))
+        
         await asyncio.sleep(rate)
+
+if __name__ == "__main__":
+    app()

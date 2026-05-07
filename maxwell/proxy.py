@@ -18,11 +18,11 @@ import logging
 import os
 import re
 import time
-from typing import Any
+from typing import Any, AsyncGenerator
 
 from .filters import BloomFilter, entropy_gate, regex_gate, repetition_gate
 from .models import Decision, FunnelStats, Task
-from .oracle import FLOPsExceeded, FLOPsLimiter, estimate_flops
+from .oracle import FLOPsExceeded, FLOPsLimiter, TaskBudget
 
 __all__ = ["PruningProxy"]
 
@@ -129,7 +129,93 @@ class PruningProxy:
                 logger.info("Circuit breaker CLOSED — load recovered")
                 self.stats.is_circuit_open = False
 
-    # ── Funnel decision engine ─────────────────────────────────────
+    # ── Streaming Proxy Engine ─────────────────────────────────────
+
+    async def process_stream(self, task: Task) -> AsyncGenerator[str, None]:
+        """
+        Stream back the result of the proxy.
+        Runs L1-L5 inline. If it passes, yields simulated LLM tokens
+        and meters FLOPs strictly.
+        """
+        self.stats.active_streams += 1
+        load = self.stats.active_streams / 100.0
+        self.stats.current_load = load
+        self._update_circuit_breaker(load)
+
+        try:
+            payload = task.payload
+            
+            # L4 (Circuit Breaker)
+            if self.stats.is_circuit_open:
+                self.stats.circuit_blocked += 1
+                await self._record(task, Decision.BLOCKED, "Circuit Breaker Open")
+                yield '{"error": "service overloaded"}'
+                return
+
+            # L1: Bloom Filter
+            if payload in self.bloom:
+                self.stats.bloom_blocked += 1
+                await self._record(task, Decision.BLOCKED, "L1: Bloom Filter")
+                yield '{"error": "Blocked by L1: Bloom Filter"}'
+                return
+
+            # L2: Regex Rules
+            if regex_gate(payload, self.rules):
+                self.stats.regex_blocked += 1
+                await self._record(task, Decision.BLOCKED, "L2: Regex Rule")
+                yield '{"error": "Blocked by L2: Regex Rule"}'
+                return
+
+            # L3: Shannon Entropy
+            if entropy_gate(payload, self.entropy_low, self.entropy_high, load):
+                self.stats.entropy_blocked += 1
+                await self._record(task, Decision.BLOCKED, "L3: Entropy")
+                yield '{"error": "Blocked by L3: Entropy"}'
+                return
+
+            # L5: Anti-Idle Repetition
+            if repetition_gate(payload):
+                self.stats.repetition_blocked += 1
+                await self._record(task, Decision.BLOCKED, "L5: Repetition")
+                yield '{"error": "Blocked by L5: Repetition"}'
+                return
+
+            # L4: Oracle FLOPs Budget Creation
+            try:
+                budget = self.oracle_limiter.create_task_budget(task.token_estimate)
+                self.stats.total_flops_estimated += budget.consumed_flops
+            except FLOPsExceeded:
+                self.stats.oracle_blocked += 1
+                await self._record(task, Decision.BLOCKED, "L4: FLOPs Budget Exceeded (Prefill)")
+                yield '{"error": "Blocked by L4: Budget Exceeded on Input"}'
+                return
+
+            # Passed filters
+            self.stats.passed_to_engine += 1
+            await self._record(task, Decision.PASSED, "Passed to Mock LLM Engine")
+            
+            # Simulated Streaming Response
+            yield "Here is the response from the simulated Compute Engine:\n"
+            words = (task.payload * 2).split() + ["\nAnd", "here", "are", "more", "output", "tokens", "generated", "by", "the", "model."] * 10
+            
+            for word in words:
+                await asyncio.sleep(0.02)  # Simulate GPU latency
+                try:
+                    budget.consume_tokens(1)  # 1 word ~ 1 token for simplicity
+                    # Add decoding FLOPs to global stats
+                    self.stats.total_flops_estimated += 2.0 * self.model_params * 1
+                    yield word + " "
+                except FLOPsExceeded:
+                    yield "\n\n<TRUNCATED: FLOPs Budget Exceeded! Generation stopped.>"
+                    logger.warning("Stream truncated: Budget exceeded for task %d", task.id)
+                    return
+            
+            yield "\n\n<DONE>"
+        finally:
+            self.stats.active_streams -= 1
+            self.stats.current_load = self.stats.active_streams / 100.0
+
+    # ── Funnel decision engine (Background Queue worker) ────────────
 
     async def funnel_worker(self, worker_id: int = 0) -> None:
         """

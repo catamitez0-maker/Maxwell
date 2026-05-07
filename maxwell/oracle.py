@@ -16,10 +16,9 @@ This module is the "precision ruler" for fair compute pricing.
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 
-__all__ = ["estimate_flops", "FLOPsLimiter", "FLOPsExceeded"]
+__all__ = ["estimate_flops", "FLOPsLimiter", "FLOPsExceeded", "TaskBudget"]
 
 logger = logging.getLogger("maxwell.oracle")
 
@@ -98,6 +97,34 @@ def estimate_flops(
     )
 
 
+class TaskBudget:
+    """
+    Stateful budget tracker for a single streaming task.
+    """
+    def __init__(self, limit: float, model_params: int, input_tokens: int) -> None:
+        self.limit = limit
+        self.model_params = model_params
+        self.input_tokens = input_tokens
+        self.output_tokens = 0
+        
+        # Initial consumption based on prefill
+        est = estimate_flops(model_params, input_tokens)
+        self.consumed_flops = est.total_flops
+        
+        if self.consumed_flops > self.limit:
+            raise FLOPsExceeded(self.limit, self.consumed_flops)
+            
+    def consume_tokens(self, num_tokens: int = 1) -> None:
+        """Consume FLOPs for generated output tokens."""
+        self.output_tokens += num_tokens
+        # Decoding FLOPs: 2 * N * tokens
+        flops = 2.0 * self.model_params * num_tokens
+        self.consumed_flops += flops
+        
+        if self.consumed_flops > self.limit:
+            raise FLOPsExceeded(self.limit, self.consumed_flops)
+
+
 class FLOPsLimiter:
     """
     Per-task compute budget enforcer.
@@ -140,3 +167,7 @@ class FLOPsLimiter:
         """Return remaining FLOPs budget for a given sequence."""
         est = estimate_flops(self.model_params, seq_length)
         return max(0.0, self.flops_limit - est.total_flops)
+        
+    def create_task_budget(self, input_tokens: int) -> TaskBudget:
+        """Create a stateful tracker for a streaming task."""
+        return TaskBudget(self.flops_limit, self.model_params, input_tokens)

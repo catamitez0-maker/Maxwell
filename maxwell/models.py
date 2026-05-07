@@ -54,6 +54,9 @@ class FunnelStats:
 
     # Pass-through
     passed_to_engine: int = 0
+    
+    # Streaming load
+    active_streams: int = 0
 
     # System
     start_time: float = field(default_factory=time.time)
