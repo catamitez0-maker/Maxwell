@@ -11,7 +11,6 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, cast
 
 from kademlia.network import Server
 import socket
