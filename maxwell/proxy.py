@@ -122,14 +122,17 @@ class PruningProxy:
 
     async def reload_rules(self, config_path: str) -> bool:
         try:
-            if not os.path.exists(config_path):
+            if not await asyncio.to_thread(os.path.exists, config_path):
                 return False
-            mtime = os.path.getmtime(config_path)
+            mtime = await asyncio.to_thread(os.path.getmtime, config_path)
             if mtime <= self._last_config_mtime:
                 return False
 
-            with open(config_path, "r") as f:
-                config: dict[str, Any] = json.load(f)
+            def _load_json() -> dict[str, Any]:
+                with open(config_path, "r") as f:
+                    return json.load(f)
+
+            config = await asyncio.to_thread(_load_json)
 
             new_bloom = BloomFilter(capacity=10_000, fp_rate=0.01)
             blacklist = config.get("blacklist", [])
