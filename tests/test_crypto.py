@@ -22,3 +22,24 @@ def test_tee_simulator_signature():
     # Test MRENCLAVE mismatch
     tampered_quote = quote._replace(mrenclave="bad_hash")
     assert TEESimulator.verify_execution(tampered_quote, task_id) == False
+
+    # Test invalid certificate chain length
+    tampered_quote = quote._replace(certificate_chain=quote.certificate_chain[:2])
+    assert TEESimulator.verify_execution(tampered_quote, task_id) == False
+
+    # Test missing ROOT_CA_MOCK in certificate chain
+    tampered_chain = list(quote.certificate_chain)
+    tampered_chain[0] = "-----BEGIN CERTIFICATE-----\nINVALID_CA_MOCK\n-----END CERTIFICATE-----"
+    tampered_quote = quote._replace(certificate_chain=tampered_chain)
+    assert TEESimulator.verify_execution(tampered_quote, task_id) == False
+
+    # Test tampered flops_actual
+    tampered_quote = quote._replace(flops_actual=1)
+    assert TEESimulator.verify_execution(tampered_quote, task_id) == False
+
+    # Test mismatched task_id
+    assert TEESimulator.verify_execution(quote, task_id + 1) == False
+
+    # Test invalid signature format (triggers exception)
+    tampered_quote = quote._replace(signature_hex="0xinvalid")
+    assert TEESimulator.verify_execution(tampered_quote, task_id) == False
