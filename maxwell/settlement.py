@@ -14,7 +14,6 @@ from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException
 from web3 import Web3
 from eth_account import Account
-import json
 
 from maxwell.crypto import TEESimulator, TEEQuote
 
