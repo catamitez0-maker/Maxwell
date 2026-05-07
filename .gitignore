@@ -12,3 +12,4 @@ build/
 *.egg-info/
 logs/
 maxwell_access.jsonl
+gemini-code-*.md
