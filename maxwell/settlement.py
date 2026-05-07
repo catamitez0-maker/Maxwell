@@ -10,7 +10,7 @@ import os
 from contextlib import asynccontextmanager
 import logging
 from typing import Dict, Any, AsyncGenerator
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException
 from web3 import Web3
 from eth_account import Account
@@ -21,14 +21,14 @@ from maxwell.crypto import TEESimulator, TEEQuote
 logger = logging.getLogger("maxwell.settlement")
 
 class SettleRequest(BaseModel):
-    task_id: int
-    provider_address: str
-    consumer_address: str
-    flops_actual: int
-    signature_hex: str
-    mrenclave: str
+    task_id: int = Field(..., ge=0)
+    provider_address: str = Field(..., pattern=r"^0x[a-fA-F0-9]{40}$")
+    consumer_address: str = Field(..., pattern=r"^0x[a-fA-F0-9]{40}$")
+    flops_actual: int = Field(..., ge=0)
+    signature_hex: str = Field(..., pattern=r"^(0x)?[a-fA-F0-9]{130}$")
+    mrenclave: str = Field(..., pattern=r"^[a-fA-F0-9]{64}$")
     certificate_chain: list[str]
-    price_per_petaflop: float
+    price_per_petaflop: float = Field(..., ge=0.0)
     is_state_channel: bool = True  # If True, signature is from Consumer. If False, from TEE.
 
 # Minimal ABI for MaxwellSettlement contract
