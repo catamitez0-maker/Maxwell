@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from .hardware import hardware_monitor, HardwareMetrics
+from .hardware import hardware_monitor
 
 __all__ = ["estimate_flops", "FLOPsLimiter", "FLOPsExceeded", "TaskBudget", "ModelConfig", "MODELS", "ComputeReceipt"]
 
