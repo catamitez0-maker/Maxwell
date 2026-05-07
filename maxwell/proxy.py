@@ -24,7 +24,7 @@ import aiohttp
 from .crypto import TEESimulator, TEEQuote
 from .filters import BloomFilter, entropy_gate, regex_gate, repetition_gate
 from .models import Decision, FunnelStats, Task
-from .oracle import FLOPsExceeded, FLOPsLimiter, TaskBudget, ModelConfig, MODELS
+from .oracle import FLOPsExceeded, FLOPsLimiter, ModelConfig, MODELS
 from .p2p import P2PManager
 
 __all__ = ["PruningProxy", "TokenBucket"]
