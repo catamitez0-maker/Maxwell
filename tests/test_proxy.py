@@ -6,8 +6,9 @@ import asyncio
 
 import pytest
 
+from unittest.mock import patch
 from maxwell.models import FunnelStats, Task
-from maxwell.proxy import PruningProxy
+from maxwell.proxy import PruningProxy, TokenBucket
 
 
 @pytest.fixture
@@ -131,3 +132,42 @@ class TestPruningProxy:
         assert proxy.is_running is True
         proxy.shutdown()
         assert proxy.is_running is False
+
+
+class TestTokenBucket:
+    def test_initial_capacity(self) -> None:
+        """Should be able to consume up to initial capacity."""
+        bucket = TokenBucket(capacity=5.0, fill_rate=1.0)
+        assert bucket.consume(1.0) is True
+        assert bucket.consume(4.0) is True
+        assert bucket.consume(1.0) is False  # Exhausted
+
+    @patch('time.time')
+    def test_time_based_refill(self, mock_time) -> None:
+        """Should refill tokens based on elapsed time."""
+        mock_time.return_value = 1000.0
+        bucket = TokenBucket(capacity=5.0, fill_rate=1.0)
+
+        # Consume all tokens
+        assert bucket.consume(5.0) is True
+        assert bucket.consume(1.0) is False
+
+        # Advance time by 2 seconds (should refill 2 tokens)
+        mock_time.return_value = 1002.0
+        assert bucket.consume(1.0) is True
+        assert bucket.consume(1.0) is True
+        assert bucket.consume(1.0) is False  # Only 2 were refilled
+
+    @patch('time.time')
+    def test_capacity_limit(self, mock_time) -> None:
+        """Should not refill beyond max capacity."""
+        mock_time.return_value = 1000.0
+        bucket = TokenBucket(capacity=5.0, fill_rate=1.0)
+
+        # Consume 2 tokens
+        assert bucket.consume(2.0) is True
+
+        # Advance time by 10 seconds (would theoretically refill 10, but capped at 5)
+        mock_time.return_value = 1010.0
+        assert bucket.consume(5.0) is True
+        assert bucket.consume(1.0) is False  # Capped at 5
