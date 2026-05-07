@@ -87,3 +87,26 @@ def test_get_best_provider_zero_reputation(p2p_manager):
 
 def test_get_best_provider_empty(p2p_manager):
     assert p2p_manager.get_best_provider() is None
+
+def test_get_best_provider_price_impact(p2p_manager):
+    p1 = ProviderInfo(node_id="p1", host="127.0.0.1", port=9000, price=2.0, model="7B")
+    p2 = ProviderInfo(node_id="p2", host="127.0.0.1", port=9001, price=1.0, model="7B")
+
+    p2p_manager.providers["p1"] = p1
+    p2p_manager.providers["p2"] = p2
+
+    # Both have 100.0 reputation by default.
+    # p2 has a lower price, so it should be selected.
+    best = p2p_manager.get_best_provider()
+    assert best is not None
+    assert best.node_id == "p2"
+
+def test_get_best_provider_zero_price(p2p_manager):
+    p1 = ProviderInfo(node_id="p1", host="127.0.0.1", port=9000, price=0.0, model="7B")
+
+    p2p_manager.providers["p1"] = p1
+
+    # Should not raise division by zero
+    best = p2p_manager.get_best_provider()
+    assert best is not None
+    assert best.node_id == "p1"
