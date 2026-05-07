@@ -256,6 +256,9 @@ class PruningProxy:
                             await ws.send_json({"payload": payload, "token_estimate": task.token_estimate})
                             
                             buffer = ""
+                            signature_found = False
+                            signature_chunks = []
+
                             async for msg in ws:
                                 if msg.type == aiohttp.WSMsgType.TEXT:
                                     text_chunk = msg.data
@@ -279,18 +282,28 @@ class PruningProxy:
                                             pass
                                         continue
                                         
+                                    if signature_found:
+                                        signature_chunks.append(text_chunk)
+                                        continue
+
                                     buffer += text_chunk
                                 
-                                marker_idx = buffer.find("<TEE_SIGNATURE>")
-                                if marker_idx != -1:
-                                    if marker_idx > 0:
-                                        yield buffer[:marker_idx]
-                                    buffer = buffer[marker_idx:]
-                                else:
-                                    if len(buffer) > 20:
-                                        yield buffer[:-20]
-                                        buffer = buffer[-20:]
+                                if not signature_found:
+                                    marker_idx = buffer.find("<TEE_SIGNATURE>")
+                                    if marker_idx != -1:
+                                        signature_found = True
+                                        if marker_idx > 0:
+                                            yield buffer[:marker_idx]
+                                        signature_chunks.append(buffer[marker_idx:])
+                                        buffer = ""
+                                    else:
+                                        if len(buffer) > 20:
+                                            yield buffer[:-20]
+                                            buffer = buffer[-20:]
                             
+                            if signature_found:
+                                buffer = "".join(signature_chunks)
+
                             if buffer:
                                 if buffer.startswith("<TEE_SIGNATURE>"):
                                     try:
