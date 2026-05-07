@@ -16,8 +16,11 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 contract MaxwellSettlement is Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
 
     // ── Data Structures ───────────────────────────────────────────
 
@@ -64,6 +67,12 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
 
     uint256 public taskCounter;
     uint256 public protocolFeePool;
+    
+    IERC20 public mxtToken;
+
+    constructor(address _mxtToken) Ownable(msg.sender) {
+        mxtToken = IERC20(_mxtToken);
+    }
 
     // ── Events ────────────────────────────────────────────────────
 
@@ -84,15 +93,17 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
      * @param pricePerPetaflop Price in wei per PetaFLOP of compute
      * @param teePublicKey The Ethereum address representing the TEE public key
      */
-    function registerProvider(uint256 pricePerPetaflop, address teePublicKey) external payable {
-        require(msg.value >= MIN_STAKE, "Insufficient stake");
+    function registerProvider(uint256 pricePerPetaflop, address teePublicKey, uint256 stakeAmount) external {
+        require(stakeAmount >= MIN_STAKE, "Insufficient stake");
         require(pricePerPetaflop > 0, "Price must be > 0");
         require(teePublicKey != address(0), "Invalid TEE address");
         require(!providers[msg.sender].isActive, "Already registered");
+        
+        mxtToken.safeTransferFrom(msg.sender, address(this), stakeAmount);
 
         providers[msg.sender] = Provider({
             addr: msg.sender,
-            stake: msg.value,
+            stake: stakeAmount,
             pricePerPetaflop: pricePerPetaflop,
             totalFlopsServed: 0,
             totalEarned: 0,
@@ -100,7 +111,7 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
             isActive: true
         });
 
-        emit ProviderRegistered(msg.sender, msg.value, pricePerPetaflop);
+        emit ProviderRegistered(msg.sender, stakeAmount, pricePerPetaflop);
     }
 
     /**
@@ -114,8 +125,7 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
         uint256 stake = p.stake;
         p.stake = 0;
 
-        (bool sent, ) = msg.sender.call{value: stake}("");
-        require(sent, "Stake return failed");
+        mxtToken.safeTransfer(msg.sender, stake);
 
         emit ProviderDeactivated(msg.sender);
     }
@@ -125,10 +135,11 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
     /**
      * @notice Deposit funds for compute consumption.
      */
-    function deposit() external payable {
-        require(msg.value > 0, "Must deposit > 0");
-        consumerBalances[msg.sender] += msg.value;
-        emit ConsumerDeposited(msg.sender, msg.value);
+    function deposit(uint256 amount) external {
+        require(amount > 0, "Must deposit > 0");
+        mxtToken.safeTransferFrom(msg.sender, address(this), amount);
+        consumerBalances[msg.sender] += amount;
+        emit ConsumerDeposited(msg.sender, amount);
     }
 
     /**
@@ -138,8 +149,7 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
         require(consumerBalances[msg.sender] >= amount, "Insufficient balance");
         consumerBalances[msg.sender] -= amount;
 
-        (bool sent, ) = msg.sender.call{value: amount}("");
-        require(sent, "Withdraw failed");
+        mxtToken.safeTransfer(msg.sender, amount);
 
         emit ConsumerWithdrawn(msg.sender, amount);
     }
@@ -214,6 +224,53 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @notice State Channel Settlement (Incremental or Final)
+     * @param taskId The task to report
+     * @param flopsActual Actual FLOPs consumed as signed by consumer
+     * @param consumerSignature Cryptographic signature from the Consumer authorizing payment
+     */
+    function settleStateChannel(uint256 taskId, uint256 flopsActual, bytes calldata consumerSignature) external nonReentrant {
+        ComputeTask storage task = tasks[taskId];
+        require(msg.sender == task.provider, "Only provider");
+        require(task.status == TaskStatus.Pending || task.status == TaskStatus.Executed, "Invalid status");
+        require(flopsActual > task.flopsActual, "Monotonically increasing FLOPs required");
+
+        // Verify consumer signature
+        bytes32 messageHash = keccak256(abi.encodePacked(taskId, flopsActual));
+        bytes32 ethSignedMessageHash = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash)
+        );
+        address recoveredSigner = recoverSigner(ethSignedMessageHash, consumerSignature);
+        require(recoveredSigner == task.consumer, "Invalid consumer signature");
+
+        Provider storage provider = providers[task.provider];
+
+        // Calculate incremental cost
+        uint256 incrementalFlops = flopsActual - task.flopsActual;
+        uint256 cost = (incrementalFlops * provider.pricePerPetaflop) / 1e15;
+
+        // Cap at max budget
+        uint256 remainingBudget = task.maxBudgetWei - task.settledAmount;
+        if (cost > remainingBudget) {
+            cost = remainingBudget;
+        }
+
+        uint256 fee = (cost * PROTOCOL_FEE_BPS) / 10000;
+        uint256 providerPayment = cost - fee;
+
+        task.flopsActual = flopsActual;
+        task.settledAmount += cost;
+        task.settledAt = block.timestamp;
+        
+        provider.totalFlopsServed += incrementalFlops;
+        provider.totalEarned += providerPayment;
+        protocolFeePool += fee;
+
+        mxtToken.safeTransfer(task.provider, providerPayment);
+        emit TaskSettled(taskId, cost);
+    }
+
+    /**
      * @notice Settle a task after challenge window expires.
      *         Calculates payment based on actual FLOPs × provider's rate.
      */
@@ -255,8 +312,7 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
         task.status = TaskStatus.Settled;
 
         // Transfer to provider
-        (bool sent, ) = task.provider.call{value: providerPayment}("");
-        require(sent, "Payment failed");
+        mxtToken.safeTransfer(task.provider, providerPayment);
 
         emit TaskSettled(taskId, cost);
     }
@@ -320,12 +376,7 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
     function withdrawProtocolFees() external onlyOwner nonReentrant {
         uint256 amount = protocolFeePool;
         protocolFeePool = 0;
-        (bool sent, ) = owner().call{value: amount}("");
-        require(sent, "Fee withdrawal failed");
-    }
-
-    receive() external payable {
-        consumerBalances[msg.sender] += msg.value;
+        mxtToken.safeTransfer(owner(), amount);
     }
 
     // ── Internal Helpers ──────────────────────────────────────────

@@ -60,6 +60,8 @@ def serve(
     price: float = typer.Option(1.0, help="Provider price per PetaFLOP"),
     backend_url: str = typer.Option("", help="Actual LLM backend URL (e.g. http://localhost:11434/api/generate)"),
     backend_type: str = typer.Option("ollama", help="Backend type: ollama, openai, vllm"),
+    bootstrap_node: str = typer.Option("", help="Kademlia bootstrap node (IP:PORT)"),
+    public_ip: str = typer.Option("127.0.0.1", help="Public IP to broadcast in DHT"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
 ) -> None:
     """Start Maxwell proxy in server or simulation mode."""
@@ -69,7 +71,7 @@ def serve(
         mode, host, port, config, log, rate,
         entropy_low, entropy_high, workers,
         model_name, max_seq, role, price, node_id,
-        backend_url, backend_type,
+        backend_url, backend_type, bootstrap_node, public_ip,
     ))
 
 
@@ -77,7 +79,7 @@ async def _run(
     mode: str, host: str, port: int, config: str, log: str, rate: float,
     entropy_low: float, entropy_high: float, workers: int,
     model_name: str, max_seq: int, role: str, price: float, node_id: str,
-    backend_url: str, backend_type: str,
+    backend_url: str, backend_type: str, bootstrap_node: str, public_ip: str,
 ) -> None:
     os.makedirs(os.path.dirname(log) or ".", exist_ok=True)
 
@@ -97,7 +99,7 @@ async def _run(
         
     p2p_manager = None
     if role in ("provider", "consumer"):
-        p2p_manager = P2PManager(node_id, role, port, price, model_name)
+        p2p_manager = P2PManager(node_id, role, port, price, model_name, bootstrap_node, public_ip)
         await p2p_manager.start()
         
     model = MODELS.get(model_name)

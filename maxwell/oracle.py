@@ -18,7 +18,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-__all__ = ["estimate_flops", "FLOPsLimiter", "FLOPsExceeded", "TaskBudget", "ModelConfig", "MODELS"]
+from .hardware import hardware_monitor, HardwareMetrics
+
+__all__ = ["estimate_flops", "FLOPsLimiter", "FLOPsExceeded", "TaskBudget", "ModelConfig", "MODELS", "ComputeReceipt"]
 
 logger = logging.getLogger("maxwell.oracle")
 
@@ -48,6 +50,16 @@ class FLOPsEstimate:
     forward_flops: float
     total_flops: float         # includes backward pass if training
     estimated_cost_usd: float  # at a given $/PetaFLOP rate
+
+
+@dataclass
+class ComputeReceipt:
+    """Hybrid receipt merging theoretical math with real hardware telemetry."""
+    theoretical_flops: float
+    energy_joules: float
+    duration_seconds: float
+    max_memory_mb: float
+    avg_utilization_percent: float
 
 
 class FLOPsExceeded(Exception):
@@ -115,6 +127,9 @@ class TaskBudget:
         self.input_tokens = input_tokens
         self.output_tokens = 0
         
+        # Start hardware measurement
+        self.hw_session = hardware_monitor.start_measurement()
+        
         # Initial consumption based on prefill
         est = estimate_flops(model, input_tokens)
         self.consumed_flops = est.total_flops
@@ -128,9 +143,20 @@ class TaskBudget:
         # Decoding FLOPs: 2 * active_params * tokens
         flops = 2.0 * self.model.active_params * num_tokens
         self.consumed_flops += flops
-        
+        self.hw_session.record_sample()
         if self.consumed_flops > self.limit:
             raise FLOPsExceeded(self.limit, self.consumed_flops)
+
+    def finalize(self) -> ComputeReceipt:
+        """Stop hardware measurement and produce a final hybrid receipt."""
+        hw_metrics = self.hw_session.stop_and_report()
+        return ComputeReceipt(
+            theoretical_flops=self.consumed_flops,
+            energy_joules=hw_metrics.energy_joules,
+            duration_seconds=hw_metrics.duration_seconds,
+            max_memory_mb=hw_metrics.max_memory_mb,
+            avg_utilization_percent=hw_metrics.avg_utilization_percent,
+        )
 
 
 class FLOPsLimiter:

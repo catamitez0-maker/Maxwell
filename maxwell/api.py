@@ -14,6 +14,7 @@ import itertools
 import logging
 import time
 
+import aiohttp
 from aiohttp import web
 
 from .models import Task
@@ -47,31 +48,74 @@ class MaxwellServer:
         self._runner: web.AppRunner | None = None
 
     async def handle_proxy(self, request: web.Request) -> web.StreamResponse | web.Response:
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        payload: str = data.get("payload", "")
-        if not payload:
-            return web.json_response({"error": "missing 'payload' field"}, status=400)
-
-        signature: str = request.headers.get("X-Maxwell-Signature", "")
-        task = Task(id=_next_task_id(), payload=payload, signature=signature)
-
-        response = web.StreamResponse()
-        response.content_type = "text/plain"
-        await response.prepare(request)
-        
-        try:
-            async for chunk in self.proxy.process_stream(task):
-                await response.write(chunk.encode("utf-8"))
-        except Exception as e:
-            logger.error("Streaming error: %s", e)
-            await response.write(f"\n<Error: {e}>".encode("utf-8"))
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
             
-        await response.write(b"\n")
-        return response
+            try:
+                msg = await ws.receive_json()
+            except Exception:
+                await ws.send_json({"error": "invalid JSON body"})
+                await ws.close()
+                return ws
+                
+            payload: str = msg.get("payload", "")
+            if not payload:
+                await ws.send_json({"error": "missing 'payload' field"})
+                await ws.close()
+                return ws
+                
+            signature: str = msg.get("signature", "")
+            task = Task(id=_next_task_id(), payload=payload, signature=signature)
+            client_msg_queue = asyncio.Queue()
+            
+            async def ws_reader() -> None:
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        import json
+                        try:
+                            await client_msg_queue.put(json.loads(msg.data))
+                        except Exception:
+                            pass
+                            
+            reader_task = asyncio.create_task(ws_reader())
+            
+            try:
+                async for chunk in self.proxy.process_stream(task, client_msg_queue):
+                    await ws.send_str(chunk)
+            except Exception as e:
+                logger.error("WebSocket streaming error: %s", e)
+                await ws.send_str(f"\n<Error: {e}>")
+            finally:
+                reader_task.cancel()
+            return ws
+
+        else:
+            try:
+                data = await request.json()
+            except Exception:
+                return web.json_response({"error": "invalid JSON body"}, status=400)
+
+            payload = data.get("payload", "")
+            if not payload:
+                return web.json_response({"error": "missing 'payload' field"}, status=400)
+
+            signature = request.headers.get("X-Maxwell-Signature", "")
+            task = Task(id=_next_task_id(), payload=payload, signature=signature)
+
+            response = web.StreamResponse()
+            response.content_type = "text/plain"
+            await response.prepare(request)
+            
+            try:
+                async for chunk in self.proxy.process_stream(task):
+                    await response.write(chunk.encode("utf-8"))
+            except Exception as e:
+                logger.error("Streaming error: %s", e)
+                await response.write(f"\n<Error: {e}>".encode("utf-8"))
+                
+            await response.write(b"\n")
+            return response
 
     async def handle_health(self, _request: web.Request) -> web.Response:
         stats = self.proxy.stats

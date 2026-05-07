@@ -33,6 +33,8 @@ dependencies = [
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
     "httpx>=0.25.0",
+    "kademlia>=2.2.2",
+    "nvidia-ml-py>=11.5.0",
 ]
 
 [project.optional-dependencies]
