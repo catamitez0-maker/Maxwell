@@ -1,0 +1,20 @@
+services:
+  maxwell:
+    build: .
+    container_name: maxwell
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./rules.json:/app/rules.json:ro
+      - maxwell-logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  maxwell-logs:

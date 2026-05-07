@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+.DS_Store
+.idea/
+.vscode/
+dist/
+build/
+*.egg-info/
+logs/
+maxwell_access.jsonl

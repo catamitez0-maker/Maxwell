@@ -1,0 +1,14 @@
+{
+    "blacklist": [
+        "dirty_blacklist_data",
+        "malicious_payload_x",
+        "spam_bot_001"
+    ],
+    "regex_rules": [
+        "^.{0,3}$",
+        "^[0-9]+$",
+        "[<>{}\\[\\]\\\\]",
+        "admin_login",
+        "exec\\("
+    ]
+}
