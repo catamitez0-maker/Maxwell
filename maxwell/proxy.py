@@ -121,15 +121,23 @@ class PruningProxy:
     # ── Config hot-reload ──────────────────────────────────────────
 
     async def reload_rules(self, config_path: str) -> bool:
+        # Prevent path traversal and arbitrary file reads by confining to the working directory
+        base_dir = os.path.abspath(os.getcwd())
+        resolved_path = os.path.abspath(config_path)
+
+        if os.path.commonpath([base_dir, resolved_path]) != base_dir:
+            logger.error("Security violation: Path traversal detected in config_path=%s", config_path)
+            return False
+
         try:
-            if not await asyncio.to_thread(os.path.exists, config_path):
+            if not await asyncio.to_thread(os.path.exists, resolved_path):
                 return False
-            mtime = await asyncio.to_thread(os.path.getmtime, config_path)
+            mtime = await asyncio.to_thread(os.path.getmtime, resolved_path)
             if mtime <= self._last_config_mtime:
                 return False
 
             def _load_json() -> dict[str, Any]:
-                with open(config_path, "r") as f:
+                with open(resolved_path, "r") as f:
                     return json.load(f)
 
             config = await asyncio.to_thread(_load_json)

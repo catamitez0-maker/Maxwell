@@ -116,14 +116,19 @@ class TestPruningProxy:
             "blacklist": ["test_block_item"],
             "regex_rules": ["^forbidden"]
         }
-        config_file = os.path.join(tempfile.mkdtemp(), "rules.json")
-        with open(config_file, "w") as f:
-            json.dump(config, f)
+        tmp_dir = tempfile.mkdtemp(dir=".")
+        try:
+            config_file = os.path.join(tmp_dir, "rules.json")
+            with open(config_file, "w") as f:
+                json.dump(config, f)
 
-        result = await proxy.reload_rules(config_file)
-        assert result is True
-        assert "test_block_item" in proxy.bloom
-        assert len(proxy.rules) == 1
+            result = await proxy.reload_rules(config_file)
+            assert result is True
+            assert "test_block_item" in proxy.bloom
+            assert len(proxy.rules) == 1
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir)
 
     @pytest.mark.asyncio
     async def test_shutdown_event(self, proxy: PruningProxy) -> None:
