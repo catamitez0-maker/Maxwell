@@ -16,8 +16,11 @@ from rich.live import Live
 from rich.panel import Panel
 
 from .api import MaxwellServer
+from .crypto import TEESimulator
 from .dashboard import create_dashboard
 from .models import FunnelStats, Task
+from .oracle import MODELS
+from .p2p import P2PManager
 from .proxy import PruningProxy
 
 app = typer.Typer(
@@ -26,6 +29,7 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+logger = logging.getLogger("maxwell.cli")
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -48,34 +52,70 @@ def serve(
     entropy_low: float = typer.Option(1.0, help="Low entropy threshold"),
     entropy_high: float = typer.Option(4.5, help="High entropy threshold"),
     workers: int = typer.Option(2, help="Number of funnel workers"),
-    model_params: int = typer.Option(
-        7_000_000_000, help="Model parameter count for FLOPs estimation"
+    model_name: str = typer.Option(
+        "llama-7b", help="Model name (e.g. llama-7b, mixtral-8x7b) for FLOPs estimation"
     ),
     max_seq: int = typer.Option(8192, help="Max sequence length for FLOPs budget"),
+    role: str = typer.Option("standalone", help="Node role: 'consumer', 'provider', 'settlement', or 'standalone'"),
+    price: float = typer.Option(1.0, help="Provider price per PetaFLOP"),
+    backend_url: str = typer.Option("", help="Actual LLM backend URL (e.g. http://localhost:11434/api/generate)"),
+    backend_type: str = typer.Option("ollama", help="Backend type: ollama, openai, vllm"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
 ) -> None:
     """Start Maxwell proxy in server or simulation mode."""
     _setup_logging(verbose)
+    node_id = f"node-{os.getpid()}-{random.randint(1000, 9999)}"
     asyncio.run(_run(
         mode, host, port, config, log, rate,
         entropy_low, entropy_high, workers,
-        model_params, max_seq,
+        model_name, max_seq, role, price, node_id,
+        backend_url, backend_type,
     ))
 
 
 async def _run(
     mode: str, host: str, port: int, config: str, log: str, rate: float,
     entropy_low: float, entropy_high: float, workers: int,
-    model_params: int, max_seq: int,
+    model_name: str, max_seq: int, role: str, price: float, node_id: str,
+    backend_url: str, backend_type: str,
 ) -> None:
     os.makedirs(os.path.dirname(log) or ".", exist_ok=True)
+
+    if role == "settlement":
+        import uvicorn
+        console.print(Panel(
+            f"[bold cyan]⚡ Maxwell Settlement Node[/bold cyan] — Listening on {host}:{port}",
+            subtitle="Role: SETTLEMENT",
+        ))
+        # Run FastAPI app
+        uvicorn.run("maxwell.settlement:app", host=host, port=port, log_level="info")
+        return
+
+    tee = None
+    if role in ("provider", "standalone"):
+        tee = TEESimulator()
+        
+    p2p_manager = None
+    if role in ("provider", "consumer"):
+        p2p_manager = P2PManager(node_id, role, port, price, model_name)
+        await p2p_manager.start()
+        
+    model = MODELS.get(model_name)
+    if not model:
+        logger.error(f"Unknown model {model_name}. Valid options: {list(MODELS.keys())}")
+        model = MODELS["llama-7b"]
 
     stats = FunnelStats()
     proxy = PruningProxy(
         stats,
         worker_count=workers,
-        model_params=model_params,
+        model=model,
         max_seq_length=max_seq,
+        role=role,
+        p2p_manager=p2p_manager,
+        tee=tee,
+        backend_url=backend_url,
+        backend_type=backend_type,
     )
     proxy.entropy_low = entropy_low
     proxy.entropy_high = entropy_high
@@ -98,14 +138,14 @@ async def _run(
         )
         console.print(Panel(
             "[bold green]⚡ Maxwell Protocol[/bold green] — Simulation Mode",
-            subtitle=f"Phase 4 · {workers} workers · {model_params/1e9:.0f}B params",
+            subtitle=f"Phase 7 · {workers} workers · {model.name}",
         ))
     else:
         server = MaxwellServer(proxy, host=host, port=port)
         await server.start()
         console.print(Panel(
             f"[bold cyan]⚡ Maxwell Protocol[/bold cyan] — Listening on {host}:{port}",
-            subtitle=f"Server Mode · {workers} workers · {model_params/1e9:.0f}B params",
+            subtitle=f"Role: {role.upper()} · Mode: {mode} · Model: {model.name}",
         ))
 
     with Live(
@@ -118,6 +158,8 @@ async def _run(
             await asyncio.sleep(0.25)
 
     console.print("\n[yellow]Shutting down…[/yellow]")
+    if p2p_manager:
+        await p2p_manager.stop()
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -143,7 +185,7 @@ async def _simulate_producer(proxy: PruningProxy, rate: float) -> None:
         "abcabcabcabcabcabcabcabcabcabcabcabc",
         "looploop" * 10,
     ]
-    async def _run_stream(task: Task):
+    async def _run_stream(task: Task) -> None:
         try:
             async for _ in proxy.process_stream(task):
                 pass

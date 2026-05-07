@@ -13,7 +13,12 @@ RUN pip install --no-cache-dir --prefix=/install \
     "bitarray>=2.8.0" \
     "mmh3>=4.0.0" \
     "numpy>=1.24.0" \
-    "aiohttp>=3.9.0"
+    "aiohttp>=3.9.0" \
+    "fastapi>=0.100.0" \
+    "uvicorn>=0.23.0" \
+    "httpx>=0.25.0" \
+    "web3>=6.0.0" \
+    "eth-account>=0.11.0"
 
 COPY maxwell/ maxwell/
 COPY rules.json .

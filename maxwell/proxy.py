@@ -20,13 +20,37 @@ import re
 import time
 from typing import Any, AsyncGenerator
 
+import aiohttp
+from .crypto import TEESimulator
 from .filters import BloomFilter, entropy_gate, regex_gate, repetition_gate
 from .models import Decision, FunnelStats, Task
-from .oracle import FLOPsExceeded, FLOPsLimiter, TaskBudget
+from .oracle import FLOPsExceeded, FLOPsLimiter, TaskBudget, ModelConfig, MODELS
+from .p2p import P2PManager
 
-__all__ = ["PruningProxy"]
+__all__ = ["PruningProxy", "TokenBucket"]
 
 logger = logging.getLogger("maxwell.proxy")
+
+
+class TokenBucket:
+    """Per-client rate limiting via token bucket algorithm."""
+    def __init__(self, capacity: float, fill_rate: float):
+        self.capacity = capacity
+        self.fill_rate = fill_rate
+        self.tokens = capacity
+        self.last_update = time.time()
+
+    def consume(self, tokens: float = 1.0) -> bool:
+        now = time.time()
+        # Add tokens based on elapsed time
+        elapsed = now - self.last_update
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.fill_rate)
+        self.last_update = now
+
+        if self.tokens >= tokens:
+            self.tokens -= tokens
+            return True
+        return False
 
 
 class PruningProxy:
@@ -38,9 +62,19 @@ class PruningProxy:
         self,
         stats: FunnelStats | None = None,
         worker_count: int = 1,
-        model_params: int = 7_000_000_000,
+        model: ModelConfig | None = None,
         max_seq_length: int = 8192,
+        role: str = "standalone",
+        p2p_manager: P2PManager | None = None,
+        tee: TEESimulator | None = None,
+        backend_url: str = "",
+        backend_type: str = "ollama",
     ) -> None:
+        self.role = role
+        self.p2p_manager = p2p_manager
+        self.tee = tee
+        self.backend_url = backend_url
+        self.backend_type = backend_type
         self.stats = stats or FunnelStats()
         self.worker_count = max(1, worker_count)
         self.input_queue: asyncio.Queue[Task] = asyncio.Queue(maxsize=1000)
@@ -57,17 +91,23 @@ class PruningProxy:
         self.entropy_low = 1.0
         self.entropy_high = 4.5
         # L4: Oracle FLOPs limiter
+        self.model = model or MODELS["llama-7b"]
         self.oracle_limiter = FLOPsLimiter(
-            model_params=model_params,
+            model=self.model,
             max_seq_length=max_seq_length,
         )
-        self.model_params = model_params
 
         # Circuit breaker
         self._high_load_start: float | None = None
         self._circuit_break_threshold = 0.9   # load ratio to trigger
         self._circuit_break_duration = 2.0     # seconds before tripping
         self._circuit_recover_threshold = 0.4  # load ratio to recover
+        
+        # QoS Multi-tenant Token Buckets
+        self.client_buckets: dict[str, TokenBucket] = {}
+        # Default bucket: max 5 concurrent requests, refilling 1 request per second
+        self.bucket_capacity = 5.0
+        self.bucket_fill_rate = 1.0
 
         self._last_config_mtime: float = 0.0
 
@@ -145,6 +185,17 @@ class PruningProxy:
         try:
             payload = task.payload
             
+            # L0: QoS Multi-tenant Token Bucket Limit
+            bucket = self.client_buckets.setdefault(
+                task.client_id, 
+                TokenBucket(self.bucket_capacity, self.bucket_fill_rate)
+            )
+            if not bucket.consume(1.0):
+                self.stats.qos_blocked += 1
+                await self._record(task, Decision.BLOCKED, "L0: QoS Rate Limited")
+                yield '{"error": "Blocked by QoS: Rate Limit Exceeded"}'
+                return
+
             # L4 (Circuit Breaker)
             if self.stats.is_circuit_open:
                 self.stats.circuit_blocked += 1
@@ -180,37 +231,154 @@ class PruningProxy:
                 yield '{"error": "Blocked by L5: Repetition"}'
                 return
 
+            # P2P Consumer Routing Logic
+            if self.role == "consumer":
+                if not self.p2p_manager:
+                    yield '{"error": "Consumer mode requires P2PManager"}'
+                    return
+                provider = self.p2p_manager.get_best_provider()
+                if not provider:
+                    yield '{"error": "No available providers on the P2P network"}'
+                    return
+                
+                # Forward to Provider via HTTP
+                url = f"http://{provider.host}:{provider.port}/v1/proxy"
+                self.stats.passed_to_engine += 1
+                await self._record(task, Decision.PASSED, f"Routed to Provider {provider.node_id}")
+                yield f"[Consumer] Routing task to Provider {provider.node_id} (Price: {provider.price})\n\n"
+                
+                async with aiohttp.ClientSession() as session:
+                    try:
+                        async with session.post(url, json={"payload": payload, "token_estimate": task.token_estimate}) as resp:
+                            buffer = ""
+                            async for chunk in resp.content.iter_any():
+                                text_chunk = chunk.decode("utf-8")
+                                buffer += text_chunk
+                                
+                                marker_idx = buffer.find("<TEE_SIGNATURE>")
+                                if marker_idx != -1:
+                                    if marker_idx > 0:
+                                        yield buffer[:marker_idx]
+                                    buffer = buffer[marker_idx:]
+                                else:
+                                    if len(buffer) > 20:
+                                        yield buffer[:-20]
+                                        buffer = buffer[-20:]
+                            
+                            if buffer:
+                                if buffer.startswith("<TEE_SIGNATURE>"):
+                                    try:
+                                        sig_json = buffer.replace("<TEE_SIGNATURE>", "").replace("\n", "").replace("<DONE>", "").strip()
+                                        sig_data = json.loads(sig_json)
+                                        is_valid = TEESimulator.verify_execution(
+                                            sig_data["public_key"], task.id, sig_data["flops_actual"], sig_data["signature"]
+                                        )
+                                        if not is_valid:
+                                            self.p2p_manager.report_failure(provider.node_id)
+                                            yield "\n\n[Consumer Warning] Invalid TEE Signature detected! Provider slashed.\n"
+                                        else:
+                                            self.p2p_manager.report_success(provider.node_id)
+                                            yield f"\n\n[Consumer Info] TEE Signature Verified OK. FLOPs: {sig_data['flops_actual']}\n"
+                                    except Exception as e:
+                                        self.p2p_manager.report_failure(provider.node_id)
+                                        yield f"\n\n[Consumer Warning] Malformed TEE Signature! Provider slashed. ({e})\n"
+                                else:
+                                    yield buffer
+                                    self.p2p_manager.report_success(provider.node_id)
+                    except Exception as e:
+                        self.p2p_manager.report_failure(provider.node_id)
+                        yield f"\n\n<Error communicating with Provider: {e}>"
+                return
+
+            # Provider / Standalone Execution Logic
+            
             # L4: Oracle FLOPs Budget Creation
             try:
                 budget = self.oracle_limiter.create_task_budget(task.token_estimate)
                 self.stats.total_flops_estimated += budget.consumed_flops
             except FLOPsExceeded:
                 self.stats.oracle_blocked += 1
+                if self.role == "consumer" and self.p2p_manager and provider:
+                    self.p2p_manager.report_failure(provider.node_id)
                 await self._record(task, Decision.BLOCKED, "L4: FLOPs Budget Exceeded (Prefill)")
                 yield '{"error": "Blocked by L4: Budget Exceeded on Input"}'
                 return
 
             # Passed filters
             self.stats.passed_to_engine += 1
-            await self._record(task, Decision.PASSED, "Passed to Mock LLM Engine")
+            await self._record(task, Decision.PASSED, "Passed to Execution Engine")
             
-            # Simulated Streaming Response
-            yield "Here is the response from the simulated Compute Engine:\n"
-            words = (task.payload * 2).split() + ["\nAnd", "here", "are", "more", "output", "tokens", "generated", "by", "the", "model."] * 10
+            actual_tokens_generated = 0
             
-            for word in words:
-                await asyncio.sleep(0.02)  # Simulate GPU latency
-                try:
-                    budget.consume_tokens(1)  # 1 word ~ 1 token for simplicity
-                    # Add decoding FLOPs to global stats
-                    self.stats.total_flops_estimated += 2.0 * self.model_params * 1
-                    yield word + " "
-                except FLOPsExceeded:
-                    yield "\n\n<TRUNCATED: FLOPs Budget Exceeded! Generation stopped.>"
-                    logger.warning("Stream truncated: Budget exceeded for task %d", task.id)
-                    return
+            if self.backend_url:
+                # Proxy to actual LLM backend
+                async with aiohttp.ClientSession() as session:
+                    if self.backend_type == "ollama":
+                        payload_data = {
+                            "model": self.model.name,
+                            "prompt": task.payload,
+                            "stream": True
+                        }
+                        try:
+                            async with session.post(self.backend_url, json=payload_data) as resp:
+                                async for chunk in resp.content.iter_any():
+                                    text = chunk.decode("utf-8")
+                                    # Ollama sends NDJSON lines
+                                    for line in text.splitlines():
+                                        if not line.strip():
+                                            continue
+                                        try:
+                                            data = json.loads(line)
+                                            if "response" in data:
+                                                word = data["response"]
+                                                budget.consume_tokens(1) # approximate 1 token
+                                                actual_tokens_generated += 1
+                                                self.stats.total_flops_estimated += 2.0 * self.model.active_params * 1
+                                                yield word
+                                        except json.JSONDecodeError:
+                                            pass
+                                        except FLOPsExceeded:
+                                            yield "\n\n<TRUNCATED: FLOPs Budget Exceeded! Generation stopped.>"
+                                            logger.warning("Stream truncated: Budget exceeded for task %d", task.id)
+                                            break
+                        except Exception as e:
+                            yield f"\n\n<Backend connection error: {e}>"
+                            
+            else:
+                # Simulated Streaming Response
+                yield "Here is the response from the simulated Compute Engine:\n"
+                words = (task.payload * 2).split() + ["\nAnd", "here", "are", "more", "output", "tokens", "generated", "by", "the", "model."] * 10
+                
+                for word in words:
+                    await asyncio.sleep(0.02)  # Simulate GPU latency
+                    try:
+                        budget.consume_tokens(1)  # 1 word ~ 1 token for simplicity
+                        # Add decoding FLOPs to global stats
+                        actual_tokens_generated += 1
+                        self.stats.total_flops_estimated += 2.0 * self.model.active_params * 1
+                        yield word + " "
+                    except FLOPsExceeded:
+                        yield "\n\n<TRUNCATED: FLOPs Budget Exceeded! Generation stopped.>"
+                        logger.warning("Stream truncated: Budget exceeded for task %d", task.id)
+                        break
             
-            yield "\n\n<DONE>"
+            # TEE Cryptographic Signature Generation
+            if self.tee:
+                # Sign the exact actual FLOPs used for this task budget
+                actual_flops = int(budget.consumed_flops)
+                sig = self.tee.sign_execution(task.id, actual_flops)
+                
+                tee_payload = {
+                    "public_key": sig.public_key,
+                    "flops_actual": sig.flops_actual,
+                    "signature": sig.signature_hex
+                }
+                yield f"\n\n<TEE_SIGNATURE> {json.dumps(tee_payload)}\n"
+                logger.info(f"[TEE Attestation Signature generated] for Task {task.id} with {actual_flops} FLOPs.")
+                
+            # If we successfully completed the local simulation as provider
+            # (In reality, Consumer only routes, Standalone does both, Provider only runs execution).
+            yield "\n<DONE>"
         finally:
             self.stats.active_streams -= 1
             self.stats.current_load = self.stats.active_streams / 100.0

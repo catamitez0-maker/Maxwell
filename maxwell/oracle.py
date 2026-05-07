@@ -18,22 +18,25 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-__all__ = ["estimate_flops", "FLOPsLimiter", "FLOPsExceeded", "TaskBudget"]
+__all__ = ["estimate_flops", "FLOPsLimiter", "FLOPsExceeded", "TaskBudget", "ModelConfig", "MODELS"]
 
 logger = logging.getLogger("maxwell.oracle")
 
+@dataclass
+class ModelConfig:
+    name: str
+    total_params: int
+    active_params: int
+    is_moe: bool
 
-# ── Well-known model parameter counts ──────────────────────────────
+# ── Well-known model configurations ──────────────────────────────
 
-MODEL_PARAMS: dict[str, int] = {
-    "gpt2": 117_000_000,
-    "gpt2-medium": 345_000_000,
-    "gpt2-large": 774_000_000,
-    "gpt2-xl": 1_500_000_000,
-    "llama-7b": 7_000_000_000,
-    "llama-13b": 13_000_000_000,
-    "llama-70b": 70_000_000_000,
-    "mixtral-8x7b": 47_000_000_000,
+MODELS: dict[str, ModelConfig] = {
+    "gpt2": ModelConfig("gpt2", 117_000_000, 117_000_000, False),
+    "llama-7b": ModelConfig("llama-7b", 7_000_000_000, 7_000_000_000, False),
+    "llama-13b": ModelConfig("llama-13b", 13_000_000_000, 13_000_000_000, False),
+    "llama-70b": ModelConfig("llama-70b", 70_000_000_000, 70_000_000_000, False),
+    "mixtral-8x7b": ModelConfig("mixtral-8x7b", 47_000_000_000, 13_000_000_000, True),
 }
 
 
@@ -58,7 +61,7 @@ class FLOPsExceeded(Exception):
 
 
 def estimate_flops(
-    model_params: int,
+    model: ModelConfig,
     seq_length: int,
     is_training: bool = False,
     cost_per_petaflop: float = 0.03,
@@ -70,7 +73,7 @@ def estimate_flops(
     Training adds ~3× overhead (forward + backward + optimizer).
 
     Args:
-        model_params: number of model parameters (N)
+        model: ModelConfig object specifying the architecture
         seq_length: total sequence length in tokens (S)
         is_training: if True, estimate includes backward pass
         cost_per_petaflop: USD cost per PetaFLOP for pricing
@@ -78,7 +81,12 @@ def estimate_flops(
     Returns:
         FLOPsEstimate with breakdown
     """
-    forward_flops = 2.0 * model_params * seq_length
+    # For a dense model or prefill of MoE, we typically use total params for simplicity.
+    # A true MoE prefill might still use all params or just active. For this metering,
+    # we assume decoding uses active_params, and standard formula uses active_params
+    # for simplification, but prefill might be more expensive.
+    # To keep it standard: 2 * active_params * seq_length.
+    forward_flops = 2.0 * model.active_params * seq_length
 
     if is_training:
         total_flops = forward_flops * 3.0  # fwd + bwd + optimizer step
@@ -89,7 +97,7 @@ def estimate_flops(
     cost = (total_flops / 1e15) * cost_per_petaflop
 
     return FLOPsEstimate(
-        model_params=model_params,
+        model_params=model.total_params,
         seq_length=seq_length,
         forward_flops=forward_flops,
         total_flops=total_flops,
@@ -101,14 +109,14 @@ class TaskBudget:
     """
     Stateful budget tracker for a single streaming task.
     """
-    def __init__(self, limit: float, model_params: int, input_tokens: int) -> None:
+    def __init__(self, limit: float, model: ModelConfig, input_tokens: int) -> None:
         self.limit = limit
-        self.model_params = model_params
+        self.model = model
         self.input_tokens = input_tokens
         self.output_tokens = 0
         
         # Initial consumption based on prefill
-        est = estimate_flops(model_params, input_tokens)
+        est = estimate_flops(model, input_tokens)
         self.consumed_flops = est.total_flops
         
         if self.consumed_flops > self.limit:
@@ -117,8 +125,8 @@ class TaskBudget:
     def consume_tokens(self, num_tokens: int = 1) -> None:
         """Consume FLOPs for generated output tokens."""
         self.output_tokens += num_tokens
-        # Decoding FLOPs: 2 * N * tokens
-        flops = 2.0 * self.model_params * num_tokens
+        # Decoding FLOPs: 2 * active_params * tokens
+        flops = 2.0 * self.model.active_params * num_tokens
         self.consumed_flops += flops
         
         if self.consumed_flops > self.limit:
@@ -135,21 +143,21 @@ class FLOPsLimiter:
 
     def __init__(
         self,
-        model_params: int,
+        model: ModelConfig,
         max_seq_length: int = 8192,
         safety_margin: float = 1.2,
     ) -> None:
-        self.model_params = model_params
+        self.model = model
         self.max_seq_length = max_seq_length
         self.safety_margin = safety_margin
 
         # Pre-compute the ceiling
-        base = estimate_flops(model_params, max_seq_length)
+        base = estimate_flops(model, max_seq_length)
         self.flops_limit: float = base.total_flops * safety_margin
 
         logger.info(
-            "FLOPs limiter: model=%d params, max_seq=%d, limit=%.2e FLOPs",
-            model_params, max_seq_length, self.flops_limit,
+            "FLOPs limiter: model=%s (active %d), max_seq=%d, limit=%.2e FLOPs",
+            model.name, model.active_params, max_seq_length, self.flops_limit,
         )
 
     def check(self, seq_length: int) -> FLOPsEstimate:
@@ -158,16 +166,16 @@ class FLOPsLimiter:
 
         Raises FLOPsExceeded if the estimate exceeds the limit.
         """
-        est = estimate_flops(self.model_params, seq_length)
+        est = estimate_flops(self.model, seq_length)
         if est.total_flops > self.flops_limit:
             raise FLOPsExceeded(self.flops_limit, est.total_flops)
         return est
 
     def remaining_budget(self, seq_length: int) -> float:
         """Return remaining FLOPs budget for a given sequence."""
-        est = estimate_flops(self.model_params, seq_length)
+        est = estimate_flops(self.model, seq_length)
         return max(0.0, self.flops_limit - est.total_flops)
         
     def create_task_budget(self, input_tokens: int) -> TaskBudget:
         """Create a stateful tracker for a streaming task."""
-        return TaskBudget(self.flops_limit, self.model_params, input_tokens)
+        return TaskBudget(self.flops_limit, self.model, input_tokens)

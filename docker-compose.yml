@@ -1,20 +1,49 @@
 services:
-  maxwell:
+  settlement-node:
     build: .
-    container_name: maxwell
+    container_name: maxwell-settlement
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    command: ["maxwell", "serve", "--role", "settlement", "--host", "0.0.0.0", "--port", "8000"]
+    logging:
+      driver: json-file
+
+  consumer-gateway:
+    build: .
+    container_name: maxwell-consumer
     restart: unless-stopped
     ports:
       - "8080:8080"
     volumes:
       - ./rules.json:/app/rules.json:ro
-      - maxwell-logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
+    command: ["maxwell", "serve", "--role", "consumer", "--host", "0.0.0.0", "--port", "8080"]
+    depends_on:
+      - settlement-node
     logging:
       driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+
+  provider-cheap:
+    build: .
+    container_name: maxwell-provider-cheap
+    restart: unless-stopped
+    command: ["maxwell", "serve", "--role", "provider", "--host", "0.0.0.0", "--port", "8081", "--price", "0.1"]
+    depends_on:
+      - settlement-node
+    logging:
+      driver: json-file
+
+  provider-premium:
+    build: .
+    container_name: maxwell-provider-premium
+    restart: unless-stopped
+    command: ["maxwell", "serve", "--role", "provider", "--host", "0.0.0.0", "--port", "8082", "--price", "2.0"]
+    depends_on:
+      - settlement-node
+    logging:
+      driver: json-file
 
 volumes:
   maxwell-logs:

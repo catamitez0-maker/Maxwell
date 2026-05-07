@@ -22,6 +22,7 @@ class Task:
     """A unit of work entering the pruning funnel."""
     id: int
     payload: str
+    client_id: str = "anonymous"
     signature: str = ""
     timestamp: float = field(default_factory=time.time)
 
@@ -48,7 +49,8 @@ class FunnelStats:
     # L5 anti-idle
     repetition_blocked: int = 0  # L5: anti-idle repetition detector
 
-    # Circuit breaker
+    # Circuit breaker & QoS
+    qos_blocked: int = 0
     circuit_blocked: int = 0
     is_circuit_open: bool = False
 
@@ -69,6 +71,7 @@ class FunnelStats:
         return (
             self.bloom_blocked + self.regex_blocked + self.entropy_blocked
             + self.oracle_blocked + self.repetition_blocked + self.circuit_blocked
+            + self.qos_blocked
         )
 
     @property

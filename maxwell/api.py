@@ -46,7 +46,7 @@ class MaxwellServer:
         self.queue_timeout = queue_timeout
         self._runner: web.AppRunner | None = None
 
-    async def handle_proxy(self, request: web.Request) -> web.Response:
+    async def handle_proxy(self, request: web.Request) -> web.StreamResponse | web.Response:
         try:
             data = await request.json()
         except Exception:
@@ -100,7 +100,8 @@ class MaxwellServer:
             "oracle": {
                 "total_flops_metered": stats.total_flops_estimated,
                 "flops_display": stats.flops_display,
-                "model_params": self.proxy.model_params,
+                "model_name": self.proxy.model.name,
+                "active_params": self.proxy.model.active_params,
             },
             "passed_to_engine": stats.passed_to_engine,
             "current_load": round(stats.current_load, 4),
@@ -110,13 +111,27 @@ class MaxwellServer:
                 "high": stats.entropy_high,
             },
             "uptime": round(stats.uptime, 1),
+            "p2p": {
+                "role": self.proxy.role,
+                "providers_count": len(self.proxy.p2p_manager.protocol.providers) if self.proxy.p2p_manager else 0,
+            }
         })
+
+    async def handle_dashboard(self, _request: web.Request) -> web.Response:
+        import os
+        html_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
+        if not os.path.exists(html_path):
+            return web.Response(text="Dashboard HTML not found", status=404)
+        with open(html_path, "r") as f:
+            content = f.read()
+        return web.Response(text=content, content_type="text/html")
 
     async def start(self) -> None:
         app = web.Application()
         app.router.add_post("/v1/proxy", self.handle_proxy)
         app.router.add_get("/healthz", self.handle_health)
         app.router.add_get("/v1/stats", self.handle_stats)
+        app.router.add_get("/dashboard", self.handle_dashboard)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)

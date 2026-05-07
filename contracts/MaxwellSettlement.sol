@@ -27,6 +27,7 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
         uint256 pricePerPetaflop;   // price in wei per PetaFLOP (1e15 FLOPs)
         uint256 totalFlopsServed;   // cumulative FLOPs delivered
         uint256 totalEarned;        // cumulative earnings in wei
+        address teePublicKey;       // TEE enclave public key for attestation
         bool isActive;
     }
 
@@ -81,10 +82,12 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
     /**
      * @notice Register as a compute provider with staked collateral.
      * @param pricePerPetaflop Price in wei per PetaFLOP of compute
+     * @param teePublicKey The Ethereum address representing the TEE public key
      */
-    function registerProvider(uint256 pricePerPetaflop) external payable {
+    function registerProvider(uint256 pricePerPetaflop, address teePublicKey) external payable {
         require(msg.value >= MIN_STAKE, "Insufficient stake");
         require(pricePerPetaflop > 0, "Price must be > 0");
+        require(teePublicKey != address(0), "Invalid TEE address");
         require(!providers[msg.sender].isActive, "Already registered");
 
         providers[msg.sender] = Provider({
@@ -93,6 +96,7 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
             pricePerPetaflop: pricePerPetaflop,
             totalFlopsServed: 0,
             totalEarned: 0,
+            teePublicKey: teePublicKey,
             isActive: true
         });
 
@@ -182,11 +186,26 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
      * @notice Provider reports task completion with actual FLOPs.
      * @param taskId The task to report
      * @param flopsActual Actual FLOPs consumed (from oracle measurement)
+     * @param signature Cryptographic signature from the TEE validating the FLOPs
      */
-    function reportExecution(uint256 taskId, uint256 flopsActual) external {
+    function reportExecution(uint256 taskId, uint256 flopsActual, bytes calldata signature) external {
         ComputeTask storage task = tasks[taskId];
         require(msg.sender == task.provider, "Only provider");
         require(task.status == TaskStatus.Pending, "Invalid status");
+
+        Provider storage providerInfo = providers[task.provider];
+        
+        // ── TEE Attestation Verification ──
+        // Message format: taskId + flopsActual
+        bytes32 messageHash = keccak256(abi.encodePacked(taskId, flopsActual));
+        // Ethereum signed message prefix
+        bytes32 ethSignedMessageHash = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash)
+        );
+        
+        // Recover the signer address from the signature
+        address recoveredSigner = recoverSigner(ethSignedMessageHash, signature);
+        require(recoveredSigner == providerInfo.teePublicKey, "Invalid TEE signature");
 
         task.flopsActual = flopsActual;
         task.status = TaskStatus.Executed;
@@ -307,5 +326,24 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
 
     receive() external payable {
         consumerBalances[msg.sender] += msg.value;
+    }
+
+    // ── Internal Helpers ──────────────────────────────────────────
+
+    function recoverSigner(bytes32 _ethSignedMessageHash, bytes memory _signature)
+        internal
+        pure
+        returns (address)
+    {
+        require(_signature.length == 65, "Invalid signature length");
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(_signature, 32))
+            s := mload(add(_signature, 64))
+            v := byte(0, mload(add(_signature, 96)))
+        }
+        return ecrecover(_ethSignedMessageHash, v, r, s);
     }
 }
