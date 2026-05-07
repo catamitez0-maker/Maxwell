@@ -234,7 +234,20 @@
     <script>
         async function fetchStats() {
             try {
-                const res = await fetch('/v1/stats');
+                const urlParams = new URLSearchParams(window.location.search);
+                const token = urlParams.get('token');
+
+                const headers = {};
+                if (token) {
+                    headers['Authorization'] = 'Bearer ' + token;
+                }
+
+                const res = await fetch('/v1/stats', { headers });
+
+                if (!res.ok) {
+                    console.error("Failed to fetch stats: " + res.status);
+                    return;
+                }
                 const data = await res.json();
                 
                 // Update basic stats

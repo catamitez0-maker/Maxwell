@@ -127,7 +127,22 @@ class MaxwellServer:
             "circuit_breaker": "OPEN" if stats.is_circuit_open else "CLOSED",
         })
 
-    async def handle_stats(self, _request: web.Request) -> web.Response:
+    async def handle_stats(self, request: web.Request) -> web.Response:
+        import os
+        api_key = os.environ.get("MAXWELL_API_KEY")
+        if not api_key:
+            return web.json_response({"error": "Stats endpoint disabled (MAXWELL_API_KEY not set)"}, status=403)
+
+        token = request.query.get("token")
+        if not token:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[len("Bearer "):]
+
+        import hmac
+        if token is None or not hmac.compare_digest(token, api_key):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
         stats = self.proxy.stats
         return web.json_response({
             "total_requests": stats.total_requests,
@@ -161,8 +176,22 @@ class MaxwellServer:
             }
         })
 
-    async def handle_dashboard(self, _request: web.Request) -> web.Response:
+    async def handle_dashboard(self, request: web.Request) -> web.Response:
         import os
+        api_key = os.environ.get("MAXWELL_API_KEY")
+        if not api_key:
+            return web.Response(text="Dashboard disabled (MAXWELL_API_KEY not set)", status=403)
+
+        token = request.query.get("token")
+        if not token:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[len("Bearer "):]
+
+        import hmac
+        if token is None or not hmac.compare_digest(token, api_key):
+            return web.Response(text="Unauthorized", status=401)
+
         html_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
         if not os.path.exists(html_path):
             return web.Response(text="Dashboard HTML not found", status=404)
