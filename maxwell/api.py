@@ -10,8 +10,12 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import base64
+import hmac
 import itertools
 import logging
+import os
+import secrets
 import time
 
 import aiohttp
@@ -46,6 +50,29 @@ class MaxwellServer:
         self.port = port
         self.queue_timeout = queue_timeout
         self._runner: web.AppRunner | None = None
+        self._admin_username = os.environ.get("MAXWELL_DASHBOARD_USERNAME", "admin")
+        self._admin_password = os.environ.get("MAXWELL_DASHBOARD_PASSWORD")
+        if not self._admin_password:
+            self._admin_password = secrets.token_urlsafe(16)
+            logger.warning("No MAXWELL_DASHBOARD_PASSWORD set. Generated random admin password: %s", self._admin_password)
+
+    def _check_auth(self, request: web.Request) -> bool:
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Basic "):
+            return False
+
+        try:
+            encoded_credentials = auth_header[6:]
+            decoded_credentials = base64.b64decode(encoded_credentials).decode("utf-8")
+            username, password = decoded_credentials.split(":", 1)
+        except Exception:
+            return False
+
+        # Use hmac.compare_digest to prevent timing attacks
+        username_match = hmac.compare_digest(username, self._admin_username)
+        password_match = hmac.compare_digest(password, self._admin_password)
+
+        return username_match and password_match
 
     async def handle_proxy(self, request: web.Request) -> web.StreamResponse | web.Response:
         if request.headers.get("Upgrade", "").lower() == "websocket":
@@ -127,7 +154,14 @@ class MaxwellServer:
             "circuit_breaker": "OPEN" if stats.is_circuit_open else "CLOSED",
         })
 
-    async def handle_stats(self, _request: web.Request) -> web.Response:
+    async def handle_stats(self, request: web.Request) -> web.Response:
+        if not self._check_auth(request):
+            return web.Response(
+                status=401,
+                headers={"WWW-Authenticate": 'Basic realm="Maxwell Dashboard"'},
+                text="401 Unauthorized",
+            )
+
         stats = self.proxy.stats
         return web.json_response({
             "total_requests": stats.total_requests,
@@ -161,8 +195,14 @@ class MaxwellServer:
             }
         })
 
-    async def handle_dashboard(self, _request: web.Request) -> web.Response:
-        import os
+    async def handle_dashboard(self, request: web.Request) -> web.Response:
+        if not self._check_auth(request):
+            return web.Response(
+                status=401,
+                headers={"WWW-Authenticate": 'Basic realm="Maxwell Dashboard"'},
+                text="401 Unauthorized",
+            )
+
         html_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
         if not os.path.exists(html_path):
             return web.Response(text="Dashboard HTML not found", status=404)
