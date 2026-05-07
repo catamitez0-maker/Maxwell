@@ -59,6 +59,12 @@ SETTLEMENT_ABI = [
 
 class Web3Relayer:
     def __init__(self) -> None:
+        self.mock_mode = not bool(os.environ.get("WEB3_RPC_URL"))
+        if self.mock_mode:
+            logger.warning("Running in MOCK mode. No real transactions will be sent.")
+            self.mock_settled_tasks: Dict[int, int] = {}
+            self.mock_balances: Dict[str, float] = {}
+
         rpc_url = os.environ.get("WEB3_RPC_URL", "http://127.0.0.1:8545")
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
         # ExtraDataToPOAMiddleware or geth_poa_middleware omitted for compatibility
@@ -68,6 +74,8 @@ class Web3Relayer:
         if pk:
             self.account = Account.from_key(pk)
         else:
+            if not self.mock_mode:
+                raise ValueError("RELAYER_PRIVATE_KEY environment variable is required in production mode.")
             # Mock account for dev if not provided
             self.account = Account.create()
             
@@ -80,12 +88,6 @@ class Web3Relayer:
             address=self.w3.to_checksum_address(contract_addr),
             abi=SETTLEMENT_ABI
         )
-        
-        self.mock_mode = not bool(os.environ.get("WEB3_RPC_URL"))
-        if self.mock_mode:
-            logger.warning("Running in MOCK mode. No real transactions will be sent.")
-            self.mock_settled_tasks: Dict[int, int] = {}
-            self.mock_balances: Dict[str, float] = {}
 
     def get_balance(self, address: str) -> float:
         if self.mock_mode:
