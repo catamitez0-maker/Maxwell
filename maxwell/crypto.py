@@ -8,17 +8,21 @@ ECDSA signature over the completed task's actual FLOPs.
 from __future__ import annotations
 
 import logging
+import os
 from typing import NamedTuple
 
-import hashlib
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
 
 logger = logging.getLogger("maxwell.crypto")
 
-# Expected enclave hash for Maxwell Provider (mock)
-EXPECTED_MRENCLAVE = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+# Expected enclave hash for Maxwell Provider.
+# Defaults to SHA256 of an empty string for development/mocking.
+# Use MAXWELL_MRENCLAVE environment variable to set a production-ready value.
+EXPECTED_MRENCLAVE = os.environ.get(
+    "MAXWELL_MRENCLAVE", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+)
 
 class TEEQuote(NamedTuple):
     public_key: str
@@ -38,9 +42,6 @@ class TEESimulator:
     """
 
     def __init__(self) -> None:
-        # Enable unprotected HD wallet features
-        Account.enable_unaudited_hdwallet_features()
-        
         # Generate a new random Ethereum account acting as the TEE hardware identity
         self._account = Account.create()
         self.public_address = self._account.address
