@@ -177,7 +177,7 @@ async def _simulate_producer(proxy: PruningProxy, rate: float) -> None:
         "123",
         "dirty_blacklist_data",
         "!!@@##$$%%^^&&**",
-        "exec(rm -rf)",
+        "system(rm -rf)",
         "<script>alert(1)</script>",
         "admin_login",
         "\x01\x02\x03_junk",

@@ -96,7 +96,7 @@ Edit `rules.json` (hot-reloaded, no restart required):
 ```json
 {
   "blacklist": ["known_bad_hash", "spam_pattern"],
-  "regex_rules": ["^.{0,3}$", "exec\\("]
+  "regex_rules": ["^.{0,3}$", "system\\("]
 }
 ```
 
@@ -205,7 +205,7 @@ curl -N -X POST http://localhost:8080/v1/proxy \
 ```json
 {
   "blacklist": ["known_bad_hash", "spam_pattern"],
-  "regex_rules": ["^.{0,3}$", "exec\\("]
+  "regex_rules": ["^.{0,3}$", "system\\("]
 }
 ```
 

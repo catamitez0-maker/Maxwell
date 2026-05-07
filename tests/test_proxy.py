@@ -40,9 +40,9 @@ class TestPruningProxy:
     async def test_regex_blocks_pattern(self, proxy: PruningProxy) -> None:
         """L2: payloads matching regex rules should be blocked."""
         import re
-        proxy.rules = [re.compile(r"exec\(")]
+        proxy.rules = [re.compile(r"system\(")]
 
-        task = Task(id=2, payload="exec(rm -rf)")
+        task = Task(id=2, payload="system(rm -rf)")
         await proxy.input_queue.put(task)
         proxy.stats.total_requests += 1
 

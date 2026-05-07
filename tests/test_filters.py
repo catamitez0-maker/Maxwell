@@ -97,12 +97,12 @@ class TestEntropyGate:
 
 class TestRegexGate:
     def test_matches_rule(self) -> None:
-        rules = [re.compile(r"exec\("), re.compile(r"admin_login")]
-        assert regex_gate("exec(rm -rf)", rules) is True
+        rules = [re.compile(r"system\("), re.compile(r"admin_login")]
+        assert regex_gate("system(rm -rf)", rules) is True
         assert regex_gate("admin_login", rules) is True
 
     def test_no_match_passes(self) -> None:
-        rules = [re.compile(r"exec\(")]
+        rules = [re.compile(r"system\(")]
         assert regex_gate("normal request", rules) is False
 
     def test_empty_rules(self) -> None:
