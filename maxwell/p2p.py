@@ -105,7 +105,7 @@ class P2PManager:
                     except Exception:
                         pass
                         
-                if self.node_id not in node_list:
+                if self.node_id not in set(node_list):
                     node_list.append(self.node_id)
                     # Keep index relatively clean
                     if len(node_list) > 100:
