@@ -163,11 +163,17 @@ class MaxwellServer:
 
     async def handle_dashboard(self, _request: web.Request) -> web.Response:
         import os
-        html_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
-        if not os.path.exists(html_path):
+
+        def _read_dashboard() -> str | None:
+            html_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
+            if not os.path.exists(html_path):
+                return None
+            with open(html_path, "r") as f:
+                return f.read()
+
+        content = await asyncio.to_thread(_read_dashboard)
+        if content is None:
             return web.Response(text="Dashboard HTML not found", status=404)
-        with open(html_path, "r") as f:
-            content = f.read()
         return web.Response(text=content, content_type="text/html")
 
     async def start(self) -> None:
