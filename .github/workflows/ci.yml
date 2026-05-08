@@ -26,6 +26,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Lint (ruff)
+        run: ruff check maxwell/ tests/
+
       - name: Run tests
         run: pytest -v --tb=short
 

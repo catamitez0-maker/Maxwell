@@ -1,233 +1,300 @@
 # ⚡ Maxwell Protocol
 
-[English](#english) | [中文](#chinese)
+**Heuristic pruning gateway & compute metering for AI inference.**
 
-> *"Stop paying for Token length. Pay for real FLOPs."*
-> 
-> *停止为信息载体买单，为真实的物理做功付费。*
+Maxwell sits between clients and LLM backends, filtering adversarial/junk traffic through a multi-layer pruning funnel before it reaches expensive GPU compute. Every token that passes is metered in FLOPs, enabling real-time cost tracking and optional on-chain settlement.
 
-[![CI](https://github.com/catamitez0-maker/Maxwell/actions/workflows/ci.yml/badge.svg)](https://github.com/catamitez0-maker/Maxwell/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![CI](https://github.com/maxwell-protocol/maxwell/actions/workflows/ci.yml/badge.svg)](https://github.com/maxwell-protocol/maxwell/actions)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
 
-<a id="english"></a>
-## 🇬🇧 English
-
-Maxwell is a decentralized, open-source **AI Compute Settlement and Filtering Protocol**. It intercepts invalid requests through heuristic pruning and accurately meters the real FLOPs consumed during AI inference, serving as foundational infrastructure for a fair compute network.
-
-### Architecture
+## Architecture
 
 ```
-  Request ───► ┌──────────────────────────────────────┐
-               │          maxwell-proxy                │
-               │  ┌─ L1: Bloom Filter (O(1))          │
-               │  ├─ L2: Regex Rules                  │
-               │  ├─ L3: Shannon Entropy Gate         │
-               │  ├─ L4: Oracle FLOPs Budget ─────────│──► maxwell-oracle
-               │  ├─ L5: Anti-Idle Repetition         │    (FLOPs ≈ 2×N×S)
-               │  └─ Circuit Breaker                  │
-               └────────────┬─────────────────────────┘
-                            │ PASSED + FLOPs budgeted
-               ┌────────────▼─────────────────────────┐
-               │        Compute Engine (GPU)           │
-               │  (Streaming dynamic FLOPs metering)   │
-               └────────────┬─────────────────────────┘
-                            │ Actual FLOPs
-               ┌────────────▼─────────────────────────┐
-               │      maxwell-contracts (Solidity)     │
-               │  FLOPs-based settlement on-chain      │
-               └──────────────────────────────────────┘
+Client → [HMAC Auth] → [Bloom Filter] → [Regex] → [Entropy Gate]
+                  → [FLOPs Oracle] → [Repetition Gate] → [Circuit Breaker]
+                  → Backend (Ollama / OpenAI / vLLM / Simulated)
+                  → [TEE Attestation] → Response
 ```
 
-### Core Subsystems
+### Pruning Layers
 
-| Subsystem | Description | Status |
-|--------|------|------|
-| **maxwell-proxy** | 5-layer heuristic pruning gateway + streaming circuit breaker | ✅ Production Ready |
-| **maxwell-oracle** | Transformer FLOPs estimation + dynamic streaming budget cutoff | ✅ Integrated |
-| **maxwell-contracts** | Solidity settlement contract (priced by FLOPs) | ✅ Contract Template |
-
-### Quick Start
-
-#### Docker (Recommended)
-
-```bash
-git clone https://github.com/catamitez0-maker/Maxwell.git
-cd Maxwell
-docker compose up -d
-```
-
-#### Local Development
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-# Server Mode
-maxwell --mode server --port 8080 --workers 4
-
-# Simulation Mode (with synthetic traffic)
-maxwell --mode simulate --rate 0.01 --verbose
-```
-
-### API Endpoints
-
-| Method | Path | Description |
-|--------|------|------|
-| `POST` | `/v1/proxy` | Submit tasks to the pruning funnel (StreamingResponse) |
-| `GET` | `/healthz` | Health check (Docker probe) |
-| `GET` | `/v1/stats` | Detailed statistics (5-layer blocks + real-time FLOPs + circuit breaker) |
-
-#### Submit Task
-
-```bash
-curl -N -X POST http://localhost:8080/v1/proxy \
-  -H "Content-Type: application/json" \
-  -d '{"payload": "your AI inference request"}'
-```
-*Note: The response will stream the generated content and dynamically meter FLOPs. It will truncate immediately if the budget is exceeded.*
-
-### Dynamic Rules Configuration
-
-Edit `rules.json` (hot-reloaded, no restart required):
-
-```json
-{
-  "blacklist": ["known_bad_hash", "spam_pattern"],
-  "regex_rules": ["^.{0,3}$", "exec\\("]
-}
-```
-
-### Smart Contracts
-
-`contracts/MaxwellSettlement.sol` implements:
-
-- **Provider Registration**: Stake deposits + set price per FLOP
-- **Consumer Deposits**: Pre-fund compute expenses
-- **Settlement by FLOPs**: `cost = flops × price_per_petaflop / 1e15`
-- **Dispute Mechanism**: 1-hour challenge window
-- **Protocol Fee**: 0.5% platform cut
-
-### Tech Stack
-
-- **Core**: Python 3.10+ / asyncio
-- **Algorithms**: `bitarray` + `mmh3` (Bloom Filter) · `numpy` (Shannon Entropy)
-- **Networking**: `aiohttp` (Async HTTP & Streaming)
-- **CLI**: `typer` + `rich` (Live Dashboard)
-- **Contracts**: Solidity ^0.8.20
-- **Deployment**: Docker multi-stage · non-root
+| Layer | Mechanism | Purpose |
+|-------|-----------|---------|
+| L1 | Bloom Filter | O(1) blacklist lookup (zero false negatives) |
+| L2 | Regex Engine | Pattern-based injection detection |
+| L3 | Shannon Entropy Gate | Block low-entropy junk (repetitive spam) |
+| L4 | FLOPs Oracle | Per-model compute budget enforcement |
+| L5 | Repetition Gate | Detect repeated-substring abuse |
+| L6 | Circuit Breaker | Auto-throttle under overload |
 
 ---
 
-<a id="chinese"></a>
-## 🇨🇳 中文
-
-Maxwell 是一套去中心化的开源 **AI 算力结算与过滤协议**。通过启发式剪枝技术拦截无效请求，动态流式计量 AI 推理的真实 FLOPs，为公平的算力网络提供底层基础设施。
-
-### 架构
-
-```
-  Request ───► ┌──────────────────────────────────────┐
-               │          maxwell-proxy                │
-               │  ┌─ L1: Bloom Filter (O(1))          │
-               │  ├─ L2: Regex Rules                  │
-               │  ├─ L3: Shannon Entropy Gate         │
-               │  ├─ L4: Oracle FLOPs Budget ─────────│──► maxwell-oracle
-               │  ├─ L5: Anti-Idle Repetition         │    (FLOPs ≈ 2×N×S)
-               │  └─ Circuit Breaker                  │
-               └────────────┬─────────────────────────┘
-                            │ PASSED + FLOPs budgeted
-               ┌────────────▼─────────────────────────┐
-               │        Compute Engine (GPU)           │
-               │  (Streaming dynamic FLOPs metering)   │
-               └────────────┬─────────────────────────┘
-                            │ Actual FLOPs
-               ┌────────────▼─────────────────────────┐
-               │      maxwell-contracts (Solidity)     │
-               │  FLOPs-based settlement on-chain      │
-               └──────────────────────────────────────┘
-```
-
-### 三大子系统
-
-| 子系统 | 说明 | 状态 |
-|--------|------|------|
-| **maxwell-proxy** | 5 层启发式剪枝网关 + 流式生成与熔断器 | ✅ 生产可用 |
-| **maxwell-oracle** | Transformer FLOPs 预估 + 动态流式算力预算截断 | ✅ 已集成 |
-| **maxwell-contracts** | Solidity 结算合约 (按 FLOPs 定价) | ✅ 合约模板 |
-
-### 快速开始
-
-#### Docker (推荐)
+## Installation
 
 ```bash
-git clone https://github.com/catamitez0-maker/Maxwell.git
-cd Maxwell
-docker compose up -d
+# Core only (6 dependencies — filtering, metering, API server)
+pip install maxwell-protocol
+
+# With TEE/Settlement (Web3 + ECDSA)
+pip install maxwell-protocol[web3]
+
+# With P2P discovery (Kademlia DHT)
+pip install maxwell-protocol[p2p]
+
+# With GPU telemetry (NVML)
+pip install maxwell-protocol[gpu]
+
+# Everything
+pip install maxwell-protocol[full]
 ```
 
-#### 本地开发
+### From source
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-# Server 模式
-maxwell --mode server --port 8080 --workers 4
-
-# Simulation 模式 (含仿真并发流量)
-maxwell --mode simulate --rate 0.01 --verbose
+git clone https://github.com/maxwell-protocol/maxwell.git
+cd maxwell
+pip install -e ".[full,dev]"
 ```
 
-### API 端点
+---
 
-| Method | Path | 说明 |
-|--------|------|------|
-| `POST` | `/v1/proxy` | 提交任务到剪枝漏斗 (StreamingResponse) |
-| `GET` | `/healthz` | 健康检查 (Docker probe) |
-| `GET` | `/v1/stats` | 详细统计 (5 层拦截 + 实时 FLOPs + 熔断器) |
+## Quick Start
 
-#### 提交任务
+### 1. Initialize a project
 
 ```bash
-curl -N -X POST http://localhost:8080/v1/proxy \
+maxwell init my-project
+cd my-project
+```
+
+This generates:
+- `maxwell.toml` — configuration file
+- `rules.json` — blacklist + regex patterns
+- `api_keys.json` — API key pair
+- `logs/` — log directory
+
+### 2. Start the server
+
+```bash
+# With config file
+maxwell serve --config maxwell.toml
+
+# Or with CLI flags
+maxwell serve --port 8080 --model-name llama-7b
+
+# Simulation mode (no backend required)
+maxwell serve --mode simulate
+```
+
+### 3. Send a request
+
+```bash
+# Generate a key
+maxwell keygen
+# → Key ID: mxk_abc123
+# → Secret: deadbeef...
+
+# Send authenticated request
+curl -X POST http://localhost:8080/v1/proxy \
   -H "Content-Type: application/json" \
-  -d '{"payload": "your AI inference request"}'
-```
-*注：该接口为流式返回。如果大模型输出期间可用算力预算耗尽，将立即强制截断数据流。*
-
-### 动态规则配置
-
-编辑 `rules.json`（热加载，无需重启）：
-
-```json
-{
-  "blacklist": ["known_bad_hash", "spam_pattern"],
-  "regex_rules": ["^.{0,3}$", "exec\\("]
-}
+  -H "X-Maxwell-Key: mxk_abc123" \
+  -H "X-Maxwell-Signature: $(python3 -c "
+import hmac, hashlib, time
+ts = str(int(time.time()))
+body = '{\"payload\": \"Explain quantum computing\"}'
+print(hmac.new(b'YOUR_SECRET', (ts+body).encode(), hashlib.sha256).hexdigest())
+")" \
+  -H "X-Maxwell-Timestamp: $(date +%s)" \
+  -d '{"payload": "Explain quantum computing"}'
 ```
 
-### 智能合约
+---
 
-`contracts/MaxwellSettlement.sol` 实现了：
+## Python SDK
 
-- **Provider 注册**: 质押保证金 + 设定 FLOPs 单价
-- **Consumer 充值**: 预存计算费用
-- **按 FLOPs 结算**: `cost = flops × price_per_petaflop / 1e15`
-- **争议机制**: 1 小时挑战窗口期
-- **协议费**: 0.5% 平台抽成
+```python
+from maxwell.client import MaxwellClient
 
-### 技术栈
+# Async usage
+async with MaxwellClient(
+    "http://localhost:8080",
+    key_id="mxk_abc123",
+    secret="your_secret_here",
+) as client:
 
-- **核心**: Python 3.10+ / asyncio
-- **算法**: `bitarray` + `mmh3` (Bloom Filter) · `numpy` (信息熵)
-- **网络**: `aiohttp` (异步 HTTP 及流式返回)
-- **CLI**: `typer` + `rich` (实时并发仪表盘)
-- **合约**: Solidity ^0.8.20
-- **部署**: Docker multi-stage · non-root
+    # Non-streaming
+    result = await client.query("What is 2+2?")
+    print(result)
+
+    # Streaming
+    async for token in client.stream("Explain transformers"):
+        print(token, end="")
+
+    # Health check (no auth required)
+    health = await client.health()
+    print(health)  # {"status": "ok", "uptime": 120.5, ...}
+
+    # Stats
+    stats = await client.stats()
+    print(stats["layers"])  # {"L1_bloom_blocked": 42, ...}
+```
+
+### Sync wrapper
+
+```python
+from maxwell.client import MaxwellClient
+
+client = MaxwellClient("http://localhost:8080")
+result = client.query_sync("Hello world")
+health = client.health_sync()
+```
+
+---
+
+## Embeddable API
+
+Use Maxwell as a library in your own application:
+
+```python
+from maxwell import PruningProxy, FunnelStats, MaxwellConfig, get_backend
+from maxwell.oracle import MODELS
+
+# Create components
+stats = FunnelStats()
+model = MODELS["llama-7b"]
+backend = get_backend("simulated")
+
+proxy = PruningProxy(
+    stats,
+    worker_count=2,
+    model=model,
+    max_seq_length=8192,
+)
+
+# Load rules
+await proxy.reload_rules("rules.json")
+
+# Process a task
+from maxwell.models import Task
+task = Task(id=1, payload="Hello, explain attention mechanisms")
+
+async for token in proxy.process_stream(task):
+    print(token, end="")
+```
+
+---
+
+## Configuration
+
+Maxwell supports three configuration sources (highest priority first):
+
+1. **CLI arguments** — `maxwell serve --port 9090`
+2. **TOML file** — `maxwell serve --config maxwell.toml`
+3. **Environment variables** — `MAXWELL_PORT=9090`
+
+### maxwell.toml
+
+```toml
+[server]
+host = "0.0.0.0"
+port = 8080
+mode = "server"         # "server" or "simulate"
+role = "standalone"     # "standalone", "consumer", "provider", "settlement"
+
+[funnel]
+entropy_low = 1.0       # Below this → block
+entropy_high = 4.5      # Above this → pass
+workers = 2
+rules_path = "rules.json"
+
+[model]
+name = "llama-7b"       # See supported models below
+max_seq_length = 8192
+
+[backend]
+backend_url = ""        # Empty = simulated mode
+backend_type = "ollama" # "ollama", "openai", "vllm"
+
+[auth]
+api_keys_path = "api_keys.json"
+
+[logging]
+log_path = "logs/maxwell_access.jsonl"
+verbose = false
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAXWELL_PORT` | `8080` | Server port |
+| `MAXWELL_HOST` | `0.0.0.0` | Bind address |
+| `MAXWELL_MODEL_NAME` | `llama-7b` | Model for FLOPs estimation |
+| `MAXWELL_BACKEND_URL` | `""` | LLM backend URL |
+| `MAXWELL_VERBOSE` | `false` | Debug logging |
+| `MAXWELL_API_KEYS` | `""` | `key:secret,key:secret` pairs |
+| `WEB3_RPC_URL` | `""` | Ethereum RPC endpoint |
+| `RELAYER_PRIVATE_KEY` | `""` | Settlement signing key |
+
+### Supported Models
+
+| Model | Active Params | FLOPs/Token |
+|-------|---------------|-------------|
+| `llama-7b` | 7B | 14 GFLOPs |
+| `llama-13b` | 13B | 26 GFLOPs |
+| `llama-70b` | 70B | 140 GFLOPs |
+| `mixtral-8x7b` | 12.9B | 25.8 GFLOPs |
+| `gpt-4-turbo` | ~200B | 400 GFLOPs |
+
+---
+
+## API Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/v1/proxy` | ✅ | Submit inference task (streaming response) |
+| GET | `/healthz` | ❌ | Health check / liveness probe |
+| GET | `/v1/stats` | ✅ | Detailed funnel statistics |
+| GET | `/dashboard` | ❌ | Web dashboard |
+| POST | `/settle` | ✅ | Submit settlement transaction |
+| GET | `/balances/{addr}` | ❌ | Check address balance |
+| GET | `/ledger` | ❌ | View transaction ledger |
+
+### Authentication
+
+All authenticated endpoints require HMAC-SHA256 headers:
+
+```
+X-Maxwell-Key: <key_id>
+X-Maxwell-Signature: HMAC-SHA256(secret, timestamp + body)
+X-Maxwell-Timestamp: <unix_epoch_seconds>
+```
+
+Requests older than 300 seconds are rejected (replay protection).
+
+---
+
+## Development
+
+```bash
+# Install with dev dependencies
+pip install -e ".[full,dev]"
+
+# Run tests
+pytest tests/ -v
+
+# Lint
+ruff check maxwell/
+
+# Type check
+mypy maxwell/
+```
+
+---
 
 ## License
 
-[MIT](LICENSE)
+MIT © Maxwell Protocol Contributors

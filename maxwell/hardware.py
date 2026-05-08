@@ -42,9 +42,9 @@ class HardwareMonitor:
                 if self.device_count > 0:
                     self.handle = pynvml.nvmlDeviceGetHandleByIndex(0)
                     self.nvml_initialized = True
-                    logger.info(f"NVML Initialized. Found {self.device_count} NVIDIA GPUs.")
+                    logger.info("NVML Initialized. Found %d NVIDIA GPUs.", self.device_count)
             except pynvml.NVMLError as e:
-                logger.warning(f"Failed to initialize NVML: {e}. Falling back to CPU simulation.")
+                logger.warning("Failed to initialize NVML: %s. Falling back to CPU simulation.", e)
 
     def _get_power_watts(self) -> float:
         if self.nvml_initialized and self.handle:
@@ -78,6 +78,8 @@ class HardwareMonitor:
         return MeasurementSession(self)
 
 class MeasurementSession:
+    _MIN_SAMPLE_INTERVAL = 0.1  # 100ms minimum between NVML calls
+
     def __init__(self, monitor: HardwareMonitor) -> None:
         self.monitor = monitor
         self.start_time = time.time()
@@ -85,20 +87,30 @@ class MeasurementSession:
         self.total_power_watts = 0.0
         self.total_utilization = 0.0
         self.max_memory = 0.0
+        self._last_sample_time = 0.0
         
-        self.record_sample()
+        self._force_sample()
 
-    def record_sample(self) -> None:
-        """Called periodically or incrementally to sample hardware."""
+    def _force_sample(self) -> None:
+        """Unconditionally record a hardware sample."""
         self.total_power_watts += self.monitor._get_power_watts()
         self.total_utilization += self.monitor._get_utilization()
         mem = self.monitor._get_memory_used_mb()
         if mem > self.max_memory:
             self.max_memory = mem
         self.samples += 1
+        self._last_sample_time = time.time()
+
+    def record_sample(self) -> None:
+        """Called periodically or incrementally to sample hardware.
+        Rate-limited to avoid excessive NVML calls."""
+        now = time.time()
+        if now - self._last_sample_time < self._MIN_SAMPLE_INTERVAL:
+            return
+        self._force_sample()
 
     def stop_and_report(self) -> HardwareMetrics:
-        self.record_sample()
+        self._force_sample()
         duration = max(0.001, time.time() - self.start_time)
         
         avg_power = self.total_power_watts / self.samples

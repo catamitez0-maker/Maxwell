@@ -3,283 +3,682 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Maxwell Protocol Dashboard</title>
+    <title>Maxwell Protocol — Live Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #0a0a0f;
-            --panel-bg: #151520;
-            --text-color: #e0e0e0;
-            --accent-green: #00ff88;
-            --accent-blue: #00d4ff;
-            --accent-red: #ff3366;
-            --font-main: 'Inter', system-ui, -apple-system, sans-serif;
-            --font-mono: 'Fira Code', 'Courier New', monospace;
+            --bg: #080810;
+            --surface: #12121e;
+            --surface-hover: #1a1a2e;
+            --border: rgba(255,255,255,0.06);
+            --text: #e8e8f0;
+            --text-dim: rgba(255,255,255,0.45);
+            --text-muted: rgba(255,255,255,0.25);
+            --accent: #00ff88;
+            --accent-glow: rgba(0,255,136,0.15);
+            --blue: #00d4ff;
+            --blue-glow: rgba(0,212,255,0.15);
+            --red: #ff3366;
+            --red-glow: rgba(255,51,102,0.15);
+            --orange: #ff9f43;
+            --purple: #a855f7;
+            --font: 'Inter', system-ui, sans-serif;
+            --mono: 'JetBrains Mono', 'Fira Code', monospace;
+            --radius: 14px;
         }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            margin: 0;
-            padding: 0;
-            background-color: var(--bg-color);
-            color: var(--text-color);
-            font-family: var(--font-main);
-            display: flex;
-            flex-direction: column;
-            align-items: center;
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--font);
             min-height: 100vh;
+            overflow-x: hidden;
         }
 
+        /* ── Header ───────────────────────────────────────── */
         header {
-            width: 100%;
-            padding: 20px 0;
-            background: linear-gradient(90deg, rgba(21,21,32,1) 0%, rgba(10,10,15,1) 100%);
-            border-bottom: 1px solid rgba(0, 255, 136, 0.2);
-            box-shadow: 0 4px 20px rgba(0, 255, 136, 0.05);
             display: flex;
             justify-content: space-between;
             align-items: center;
+            padding: 20px 32px;
+            background: linear-gradient(135deg, var(--surface) 0%, var(--bg) 100%);
+            border-bottom: 1px solid var(--border);
+            backdrop-filter: blur(20px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
         }
 
         .logo {
-            font-size: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 22px;
             font-weight: 800;
-            color: var(--text-color);
-            margin-left: 40px;
-            letter-spacing: 1px;
-            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
 
-        .logo span {
-            color: var(--accent-green);
-            text-shadow: 0 0 10px rgba(0, 255, 136, 0.4);
+        .logo-icon {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, var(--accent), var(--blue));
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            box-shadow: 0 4px 15px var(--accent-glow);
         }
 
-        .status-badge {
-            margin-right: 40px;
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-size: 14px;
-            font-weight: 600;
-            background-color: rgba(0, 255, 136, 0.1);
-            color: var(--accent-green);
-            border: 1px solid var(--accent-green);
-            box-shadow: 0 0 15px rgba(0, 255, 136, 0.2);
-            transition: all 0.3s ease;
-        }
+        .logo span { color: var(--accent); }
 
-        .status-badge.open {
-            background-color: rgba(255, 51, 102, 0.1);
-            color: var(--accent-red);
-            border-color: var(--accent-red);
-            box-shadow: 0 0 15px rgba(255, 51, 102, 0.2);
-        }
-
-        .container {
-            width: 90%;
-            max-width: 1200px;
-            margin-top: 40px;
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 24px;
-        }
-
-        .card {
-            background-color: var(--panel-bg);
-            border-radius: 16px;
-            padding: 24px;
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
-        }
-
-        .card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 15px 40px rgba(0, 212, 255, 0.1);
-            border-color: rgba(0, 212, 255, 0.3);
-        }
-
-        .card h3 {
-            margin: 0 0 16px 0;
-            font-size: 16px;
-            color: rgba(255, 255, 255, 0.6);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        .value {
-            font-size: 42px;
-            font-weight: 700;
-            color: var(--text-color);
-            margin-bottom: 8px;
-            font-family: var(--font-mono);
-        }
-
-        .value.green { color: var(--accent-green); text-shadow: 0 0 20px rgba(0, 255, 136, 0.3); }
-        .value.blue { color: var(--accent-blue); text-shadow: 0 0 20px rgba(0, 212, 255, 0.3); }
-
-        .subtitle {
-            font-size: 14px;
-            color: rgba(255, 255, 255, 0.4);
-        }
-
-        .metrics-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
+        .header-right {
+            display: flex;
+            align-items: center;
             gap: 16px;
         }
 
-        .metric-item {
-            background: rgba(0,0,0,0.2);
-            padding: 12px;
-            border-radius: 8px;
-            border-left: 3px solid var(--accent-blue);
-        }
-
-        .metric-item.danger {
-            border-left-color: var(--accent-red);
-        }
-
-        .metric-label {
+        .ws-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
             font-size: 12px;
-            color: rgba(255, 255, 255, 0.5);
-            margin-bottom: 4px;
+            color: var(--text-dim);
+            font-family: var(--mono);
         }
 
-        .metric-value {
-            font-size: 18px;
-            font-family: var(--font-mono);
-            color: var(--text-color);
+        .ws-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--red);
+            transition: background 0.3s ease;
         }
 
-        /* Funnel visualization */
+        .ws-dot.connected {
+            background: var(--accent);
+            box-shadow: 0 0 8px var(--accent-glow);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .circuit-badge {
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 700;
+            font-family: var(--mono);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            background: rgba(0,255,136,0.08);
+            color: var(--accent);
+            border: 1px solid rgba(0,255,136,0.2);
+            transition: all 0.4s ease;
+        }
+
+        .circuit-badge.open {
+            background: var(--red-glow);
+            color: var(--red);
+            border-color: rgba(255,51,102,0.3);
+            animation: glow-red 1.5s infinite alternate;
+        }
+
+        @keyframes glow-red {
+            from { box-shadow: 0 0 5px var(--red-glow); }
+            to   { box-shadow: 0 0 20px var(--red-glow); }
+        }
+
+        /* ── Grid ─────────────────────────────────────────── */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            padding: 24px 32px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .grid-wide { grid-column: span 2; }
+        .grid-full { grid-column: span 4; }
+
+        /* ── Cards ─────────────────────────────────────────── */
+        .card {
+            background: var(--surface);
+            border-radius: var(--radius);
+            padding: 24px;
+            border: 1px solid var(--border);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--accent), transparent);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .card:hover {
+            border-color: rgba(0,212,255,0.15);
+            transform: translateY(-2px);
+        }
+
+        .card:hover::before { opacity: 1; }
+
+        .card-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 8px;
+        }
+
+        .card-value {
+            font-size: 36px;
+            font-weight: 700;
+            font-family: var(--mono);
+            line-height: 1.2;
+            transition: color 0.3s ease;
+        }
+
+        .card-value.green { color: var(--accent); text-shadow: 0 0 30px var(--accent-glow); }
+        .card-value.blue { color: var(--blue); text-shadow: 0 0 30px var(--blue-glow); }
+        .card-value.orange { color: var(--orange); }
+
+        .card-sub {
+            font-size: 13px;
+            color: var(--text-dim);
+            margin-top: 4px;
+            font-family: var(--mono);
+        }
+
+        /* ── Sparkline ────────────────────────────────────── */
+        .sparkline-container {
+            margin-top: 16px;
+            height: 50px;
+            position: relative;
+        }
+
+        .sparkline-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        /* ── Funnel ────────────────────────────────────────── */
         .funnel {
             display: flex;
             flex-direction: column;
-            gap: 8px;
-            margin-top: 20px;
+            gap: 10px;
         }
 
-        .funnel-layer {
+        .funnel-row {
             display: flex;
-            justify-content: space-between;
-            padding: 8px 12px;
-            background: rgba(255, 255, 255, 0.05);
+            align-items: center;
+            gap: 12px;
+            font-size: 13px;
+            font-family: var(--mono);
+        }
+
+        .funnel-label {
+            min-width: 140px;
+            color: var(--text-dim);
+        }
+
+        .funnel-bar-track {
+            flex: 1;
+            height: 24px;
+            background: rgba(255,255,255,0.03);
             border-radius: 6px;
-            font-family: var(--font-mono);
-            font-size: 14px;
+            overflow: hidden;
+            position: relative;
         }
 
-        .funnel-layer span:last-child {
-            color: var(--accent-red);
+        .funnel-bar-fill {
+            height: 100%;
+            border-radius: 6px;
+            transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+            min-width: 2px;
+            position: relative;
         }
 
+        .funnel-bar-fill::after {
+            content: '';
+            position: absolute;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 30px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15));
+        }
+
+        .funnel-bar-fill.l1 { background: linear-gradient(90deg, #ff6b6b, #ee5a5a); }
+        .funnel-bar-fill.l2 { background: linear-gradient(90deg, #ffa94d, #ff922b); }
+        .funnel-bar-fill.l3 { background: linear-gradient(90deg, #ffd43b, #fab005); }
+        .funnel-bar-fill.l4 { background: linear-gradient(90deg, #a855f7, #9333ea); }
+        .funnel-bar-fill.l5 { background: linear-gradient(90deg, #38bdf8, #0ea5e9); }
+        .funnel-bar-fill.cb { background: linear-gradient(90deg, #f43f5e, #e11d48); }
+        .funnel-bar-fill.pass { background: linear-gradient(90deg, #34d399, #10b981); }
+
+        .funnel-count {
+            min-width: 70px;
+            text-align: right;
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        /* ── Mini Stats ───────────────────────────────────── */
+        .mini-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 16px;
+        }
+
+        .mini-stat {
+            background: rgba(0,0,0,0.3);
+            padding: 12px;
+            border-radius: 10px;
+            border-left: 3px solid var(--blue);
+        }
+
+        .mini-stat.accent { border-left-color: var(--accent); }
+        .mini-stat.orange { border-left-color: var(--orange); }
+        .mini-stat.purple { border-left-color: var(--purple); }
+
+        .mini-label {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .mini-value {
+            font-size: 18px;
+            font-weight: 600;
+            font-family: var(--mono);
+            margin-top: 2px;
+        }
+
+        /* ── Responsive ───────────────────────────────────── */
+        @media (max-width: 1100px) {
+            .grid { grid-template-columns: repeat(2, 1fr); }
+            .grid-wide { grid-column: span 2; }
+            .grid-full { grid-column: span 2; }
+        }
+
+        @media (max-width: 600px) {
+            .grid { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
+            .grid-wide, .grid-full { grid-column: span 1; }
+            header { padding: 12px 16px; }
+            .card-value { font-size: 28px; }
+        }
+
+        /* ── Transitions ──────────────────────────────────── */
+        .flash {
+            animation: flash-green 0.4s ease;
+        }
+
+        @keyframes flash-green {
+            0% { text-shadow: 0 0 0 transparent; }
+            50% { text-shadow: 0 0 15px var(--accent-glow); }
+            100% { text-shadow: 0 0 0 transparent; }
+        }
     </style>
 </head>
 <body>
 
-    <header>
-        <div class="logo">⚡ Maxwell <span>Protocol</span></div>
-        <div class="status-badge" id="circuit-status">Circuit: CLOSED</div>
-    </header>
-
-    <div class="container">
-        
-        <div class="card">
-            <h3>Network Load (QPS)</h3>
-            <div class="value blue" id="val-qps">0.00</div>
-            <div class="subtitle">Total Requests: <span id="val-req">0</span></div>
-            
-            <div class="metrics-grid" style="margin-top: 24px;">
-                <div class="metric-item">
-                    <div class="metric-label">Node Role</div>
-                    <div class="metric-value" id="val-role">STANDALONE</div>
-                </div>
-                <div class="metric-item">
-                    <div class="metric-label">P2P Peers</div>
-                    <div class="metric-value" id="val-peers">0</div>
-                </div>
-            </div>
+<header>
+    <div class="logo">
+        <div class="logo-icon">⚡</div>
+        Maxwell <span>Protocol</span>
+    </div>
+    <div class="header-right">
+        <div class="ws-indicator">
+            <div class="ws-dot" id="ws-dot"></div>
+            <span id="ws-label">Connecting...</span>
         </div>
+        <div class="circuit-badge" id="circuit-badge">Circuit: Closed</div>
+    </div>
+</header>
 
-        <div class="card">
-            <h3>Oracle Metering (FLOPs)</h3>
-            <div class="value green" id="val-flops">0.0 TFLOPs</div>
-            <div class="subtitle">Model: <span id="val-model">Llama-7B</span></div>
-            
-            <div class="metrics-grid" style="margin-top: 24px;">
-                <div class="metric-item">
-                    <div class="metric-label">Active Params</div>
-                    <div class="metric-value" id="val-params">0</div>
-                </div>
-                <div class="metric-item">
-                    <div class="metric-label">Uptime</div>
-                    <div class="metric-value" id="val-uptime">0s</div>
-                </div>
-            </div>
+<div class="grid">
+
+    <!-- Row 1: Key Metrics -->
+    <div class="card">
+        <div class="card-label">Requests / Second</div>
+        <div class="card-value blue" id="val-qps">0.00</div>
+        <div class="card-sub">Total: <span id="val-total">0</span></div>
+        <div class="sparkline-container">
+            <canvas class="sparkline-canvas" id="spark-qps"></canvas>
         </div>
-
-        <div class="card">
-            <h3>Heuristic Funnel Blocks</h3>
-            <div class="value" id="val-pruning" style="font-size: 28px;">0.00% Block Rate</div>
-            <div class="funnel">
-                <div class="funnel-layer"><span>L1: Bloom</span> <span id="l1-block">0</span></div>
-                <div class="funnel-layer"><span>L2: Regex</span> <span id="l2-block">0</span></div>
-                <div class="funnel-layer"><span>L3: Entropy</span> <span id="l3-block">0</span></div>
-                <div class="funnel-layer"><span>L4: Oracle</span> <span id="l4-block">0</span></div>
-                <div class="funnel-layer"><span>L5: Repetition</span> <span id="l5-block">0</span></div>
-            </div>
-        </div>
-
     </div>
 
-    <script>
-        async function fetchStats() {
-            try {
-                const res = await fetch('/v1/stats');
-                const data = await res.json();
-                
-                // Update basic stats
-                document.getElementById('val-qps').textContent = data.qps.toFixed(2);
-                document.getElementById('val-req').textContent = data.total_requests;
-                document.getElementById('val-flops').textContent = data.oracle.flops_display;
-                document.getElementById('val-model').textContent = data.oracle.model_name;
-                
-                const activeB = (data.oracle.active_params / 1e9).toFixed(1);
-                document.getElementById('val-params').textContent = activeB + "B";
-                
-                document.getElementById('val-role').textContent = data.p2p.role.toUpperCase();
-                document.getElementById('val-peers').textContent = data.p2p.providers_count;
-                
-                const uptime = data.uptime;
-                const m = Math.floor(uptime / 60);
-                const s = Math.floor(uptime % 60);
-                document.getElementById('val-uptime').textContent = `${m}m ${s}s`;
+    <div class="card">
+        <div class="card-label">FLOPs Metered</div>
+        <div class="card-value green" id="val-flops">0 FLOPs</div>
+        <div class="card-sub">Model: <span id="val-model">—</span></div>
+        <div class="sparkline-container">
+            <canvas class="sparkline-canvas" id="spark-flops"></canvas>
+        </div>
+    </div>
 
-                // Update funnel
-                document.getElementById('val-pruning').textContent = `${(data.pruning_rate * 100).toFixed(1)}% Blocked`;
-                document.getElementById('l1-block').textContent = data.layers.L1_bloom_blocked;
-                document.getElementById('l2-block').textContent = data.layers.L2_regex_blocked;
-                document.getElementById('l3-block').textContent = data.layers.L3_entropy_blocked;
-                document.getElementById('l4-block').textContent = data.layers.L4_oracle_blocked;
-                document.getElementById('l5-block').textContent = data.layers.L5_repetition_blocked;
+    <div class="card">
+        <div class="card-label">Pruning Rate</div>
+        <div class="card-value orange" id="val-prune">0.0%</div>
+        <div class="card-sub">Blocked / Total</div>
+        <div class="sparkline-container">
+            <canvas class="sparkline-canvas" id="spark-prune"></canvas>
+        </div>
+    </div>
 
-                // Circuit breaker
-                const cb = document.getElementById('circuit-status');
-                if (data.circuit_breaker === 'OPEN') {
-                    cb.textContent = 'Circuit: OPEN';
-                    cb.classList.add('open');
-                } else {
-                    cb.textContent = 'Circuit: CLOSED';
-                    cb.classList.remove('open');
-                }
+    <div class="card">
+        <div class="card-label">Active Streams</div>
+        <div class="card-value" id="val-streams">0</div>
+        <div class="card-sub">Engine Load: <span id="val-load">0.0%</span></div>
+        <div class="mini-grid">
+            <div class="mini-stat accent">
+                <div class="mini-label">Role</div>
+                <div class="mini-value" id="val-role">—</div>
+            </div>
+            <div class="mini-stat">
+                <div class="mini-label">Uptime</div>
+                <div class="mini-value" id="val-uptime">0s</div>
+            </div>
+            <div class="mini-stat purple">
+                <div class="mini-label">Params</div>
+                <div class="mini-value" id="val-params">—</div>
+            </div>
+            <div class="mini-stat orange">
+                <div class="mini-label">P2P Peers</div>
+                <div class="mini-value" id="val-peers">0</div>
+            </div>
+        </div>
+    </div>
 
-            } catch (err) {
-                console.error("Error fetching stats:", err);
-            }
+    <!-- Row 2: Funnel -->
+    <div class="card grid-full">
+        <div class="card-label">Heuristic Pruning Funnel</div>
+        <div class="funnel" id="funnel">
+            <div class="funnel-row">
+                <span class="funnel-label">L1 · Bloom Filter</span>
+                <div class="funnel-bar-track"><div class="funnel-bar-fill l1" id="bar-l1" style="width:0%"></div></div>
+                <span class="funnel-count" id="cnt-l1">0</span>
+            </div>
+            <div class="funnel-row">
+                <span class="funnel-label">L2 · Regex</span>
+                <div class="funnel-bar-track"><div class="funnel-bar-fill l2" id="bar-l2" style="width:0%"></div></div>
+                <span class="funnel-count" id="cnt-l2">0</span>
+            </div>
+            <div class="funnel-row">
+                <span class="funnel-label">L3 · Entropy Gate</span>
+                <div class="funnel-bar-track"><div class="funnel-bar-fill l3" id="bar-l3" style="width:0%"></div></div>
+                <span class="funnel-count" id="cnt-l3">0</span>
+            </div>
+            <div class="funnel-row">
+                <span class="funnel-label">L4 · FLOPs Oracle</span>
+                <div class="funnel-bar-track"><div class="funnel-bar-fill l4" id="bar-l4" style="width:0%"></div></div>
+                <span class="funnel-count" id="cnt-l4">0</span>
+            </div>
+            <div class="funnel-row">
+                <span class="funnel-label">L5 · Repetition</span>
+                <div class="funnel-bar-track"><div class="funnel-bar-fill l5" id="bar-l5" style="width:0%"></div></div>
+                <span class="funnel-count" id="cnt-l5">0</span>
+            </div>
+            <div class="funnel-row">
+                <span class="funnel-label">⚠ Circuit Breaker</span>
+                <div class="funnel-bar-track"><div class="funnel-bar-fill cb" id="bar-cb" style="width:0%"></div></div>
+                <span class="funnel-count" id="cnt-cb">0</span>
+            </div>
+            <div class="funnel-row">
+                <span class="funnel-label" style="color:var(--accent)">✓ Passed → Engine</span>
+                <div class="funnel-bar-track"><div class="funnel-bar-fill pass" id="bar-pass" style="width:0%"></div></div>
+                <span class="funnel-count" style="color:var(--accent)" id="cnt-pass">0</span>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    // ── Sparkline Engine ────────────────────────────────
+    class Sparkline {
+        constructor(canvasId, color, maxPoints = 60) {
+            this.canvas = document.getElementById(canvasId);
+            this.ctx = this.canvas.getContext('2d');
+            this.color = color;
+            this.maxPoints = maxPoints;
+            this.data = [];
+            this._resize();
+            window.addEventListener('resize', () => this._resize());
         }
 
-        // Fetch immediately then every 1 second
-        fetchStats();
-        setInterval(fetchStats, 1000);
-    </script>
+        _resize() {
+            const rect = this.canvas.parentElement.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            this.canvas.width = rect.width * dpr;
+            this.canvas.height = rect.height * dpr;
+            this.ctx.scale(dpr, dpr);
+            this.w = rect.width;
+            this.h = rect.height;
+        }
+
+        push(val) {
+            this.data.push(val);
+            if (this.data.length > this.maxPoints) this.data.shift();
+            this.draw();
+        }
+
+        draw() {
+            const { ctx, w, h, data, color } = this;
+            ctx.clearRect(0, 0, w, h);
+
+            if (data.length < 2) return;
+
+            const max = Math.max(...data, 1);
+            const min = Math.min(...data, 0);
+            const range = max - min || 1;
+
+            const step = w / (this.maxPoints - 1);
+
+            // Gradient fill
+            const grad = ctx.createLinearGradient(0, 0, 0, h);
+            grad.addColorStop(0, color + '30');
+            grad.addColorStop(1, 'transparent');
+
+            ctx.beginPath();
+            data.forEach((v, i) => {
+                const x = i * step;
+                const y = h - ((v - min) / range) * (h - 4) - 2;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+
+            // Fill area
+            const lastX = (data.length - 1) * step;
+            ctx.lineTo(lastX, h);
+            ctx.lineTo(0, h);
+            ctx.closePath();
+            ctx.fillStyle = grad;
+            ctx.fill();
+
+            // Stroke line
+            ctx.beginPath();
+            data.forEach((v, i) => {
+                const x = i * step;
+                const y = h - ((v - min) / range) * (h - 4) - 2;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Current value dot
+            const lastY = h - ((data[data.length - 1] - min) / range) * (h - 4) - 2;
+            ctx.beginPath();
+            ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+        }
+    }
+
+    const sparkQPS   = new Sparkline('spark-qps', '#00d4ff');
+    const sparkFLOPs = new Sparkline('spark-flops', '#00ff88');
+    const sparkPrune = new Sparkline('spark-prune', '#ff9f43');
+
+    // ── Value Flasher ───────────────────────────────────
+    const _prevValues = {};
+    function updateVal(id, text) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (_prevValues[id] !== text) {
+            el.textContent = text;
+            el.classList.remove('flash');
+            void el.offsetWidth; // reflow
+            el.classList.add('flash');
+            _prevValues[id] = text;
+        }
+    }
+
+    // ── Funnel Bar Updater ──────────────────────────────
+    function updateFunnel(data) {
+        const layers = data.layers || {};
+        const total = data.total_requests || 1;
+        const passed = data.passed_to_engine || 0;
+
+        const vals = [
+            ['l1', layers.L1_bloom_blocked || 0],
+            ['l2', layers.L2_regex_blocked || 0],
+            ['l3', layers.L3_entropy_blocked || 0],
+            ['l4', layers.L4_oracle_blocked || 0],
+            ['l5', layers.L5_repetition_blocked || 0],
+            ['cb', layers.circuit_blocked || 0],
+            ['pass', passed],
+        ];
+
+        vals.forEach(([key, count]) => {
+            const pct = Math.min(100, (count / total) * 100);
+            document.getElementById('bar-' + key).style.width = pct + '%';
+            document.getElementById('cnt-' + key).textContent = count.toLocaleString();
+        });
+    }
+
+    // ── Update Handler ──────────────────────────────────
+    function handleStats(data) {
+        // QPS & totals
+        updateVal('val-qps', data.qps.toFixed(2));
+        updateVal('val-total', data.total_requests.toLocaleString());
+
+        // FLOPs
+        updateVal('val-flops', data.oracle.flops_display);
+        updateVal('val-model', data.oracle.model_name);
+
+        // Pruning
+        updateVal('val-prune', data.pruning_rate.toFixed(1) + '%');
+
+        // Streams & load
+        updateVal('val-streams', (data.active_streams || 0).toString());
+        updateVal('val-load', (data.current_load * 100).toFixed(1) + '%');
+
+        // Meta
+        updateVal('val-role', (data.p2p?.role || '—').toUpperCase());
+        updateVal('val-peers', (data.p2p?.providers_count || 0).toString());
+
+        const params = data.oracle.active_params;
+        updateVal('val-params', params >= 1e9 ? (params / 1e9).toFixed(1) + 'B' : params.toLocaleString());
+
+        const up = data.uptime;
+        const h = Math.floor(up / 3600);
+        const m = Math.floor((up % 3600) / 60);
+        const s = Math.floor(up % 60);
+        updateVal('val-uptime', h > 0 ? `${h}h${m}m` : `${m}m${s}s`);
+
+        // Circuit breaker
+        const cb = document.getElementById('circuit-badge');
+        if (data.circuit_breaker === 'OPEN') {
+            cb.textContent = 'Circuit: OPEN';
+            cb.classList.add('open');
+        } else {
+            cb.textContent = 'Circuit: Closed';
+            cb.classList.remove('open');
+        }
+
+        // Sparklines
+        sparkQPS.push(data.qps);
+        sparkFLOPs.push(data.oracle.total_flops_metered);
+        sparkPrune.push(data.pruning_rate);
+
+        // Funnel
+        updateFunnel(data);
+    }
+
+    // ── WebSocket Connection ────────────────────────────
+    let ws;
+    let reconnectDelay = 1000;
+
+    function connectWS() {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${proto}//${location.host}/ws/stats`);
+
+        ws.onopen = () => {
+            document.getElementById('ws-dot').classList.add('connected');
+            document.getElementById('ws-label').textContent = 'Live';
+            reconnectDelay = 1000;
+        };
+
+        ws.onmessage = (evt) => {
+            try {
+                const data = JSON.parse(evt.data);
+                handleStats(data);
+            } catch (e) {
+                console.error('WS parse error:', e);
+            }
+        };
+
+        ws.onclose = () => {
+            document.getElementById('ws-dot').classList.remove('connected');
+            document.getElementById('ws-label').textContent = 'Reconnecting...';
+            setTimeout(connectWS, reconnectDelay);
+            reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
+        };
+
+        ws.onerror = () => ws.close();
+    }
+
+    // ── Fallback: HTTP Polling ───────────────────────────
+    async function pollFallback() {
+        try {
+            const res = await fetch('/v1/stats');
+            const data = await res.json();
+            handleStats(data);
+        } catch (e) {
+            console.error('Poll error:', e);
+        }
+    }
+
+    // Start
+    connectWS();
+    // Fallback poll every 2s in case WS fails
+    setInterval(() => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            pollFallback();
+        }
+    }, 2000);
+</script>
 </body>
 </html>

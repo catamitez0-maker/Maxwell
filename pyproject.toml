@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maxwell-protocol"
-version = "0.1.0"
+version = "0.2.0"
 description = "Decentralized compute metering & heuristic pruning gateway for AI inference."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,26 +22,35 @@ classifiers = [
     "Framework :: AsyncIO",
 ]
 dependencies = [
+    # Core — filtering, metering, API server
     "rich>=13.0.0",
     "typer>=0.9.0",
-    "eth-account>=0.11.0",
-    "web3>=6.0.0",
     "bitarray>=2.8.0",
     "mmh3>=4.0.0",
     "numpy>=1.24.0",
     "aiohttp>=3.9.0",
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
-    "httpx>=0.25.0",
-    "kademlia>=2.2.2",
-    "nvidia-ml-py>=11.5.0",
 ]
 
 [project.optional-dependencies]
+web3 = [
+    "web3>=6.0.0",
+    "eth-account>=0.11.0",
+]
+p2p = [
+    "kademlia>=2.2.2",
+]
+gpu = [
+    "nvidia-ml-py>=11.5.0",
+]
+full = [
+    "maxwell-protocol[web3,p2p,gpu]",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-aiohttp>=1.0.0",
     "mypy>=1.5.0",
+    "ruff>=0.4.0",
 ]
 
 [project.scripts]
@@ -50,6 +59,9 @@ maxwell = "maxwell.cli:app"
 [tool.setuptools.packages.find]
 include = ["maxwell*"]
 exclude = ["contracts*", "tests*"]
+
+[tool.setuptools.package-data]
+maxwell = ["*.html"]
 
 [project.urls]
 Homepage = "https://github.com/maxwell-protocol/maxwell"

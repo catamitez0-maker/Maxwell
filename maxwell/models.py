@@ -4,6 +4,7 @@ Core data models with strict type hints.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -34,7 +35,7 @@ class Task:
 
 @dataclass
 class FunnelStats:
-    """Real-time statistics for the pruning funnel."""
+    """Real-time statistics for the pruning funnel (async-safe)."""
     total_requests: int = 0
 
     # L1-L3 pruning counters
@@ -65,6 +66,21 @@ class FunnelStats:
     current_load: float = 0.0
     entropy_low: float = 1.0
     entropy_high: float = 4.5
+
+    # Concurrency lock (excluded from repr/eq)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+
+    async def increment(self, field_name: str, value: int | float = 1) -> None:
+        """Atomically increment a counter field."""
+        async with self._lock:
+            current = getattr(self, field_name)
+            setattr(self, field_name, current + value)
+
+    async def decrement(self, field_name: str, value: int | float = 1) -> None:
+        """Atomically decrement a counter field."""
+        async with self._lock:
+            current = getattr(self, field_name)
+            setattr(self, field_name, current - value)
 
     @property
     def total_blocked(self) -> int:
@@ -106,3 +122,4 @@ class FunnelStats:
             return f"{f / 1e6:.2f} MFLOPs"
         else:
             return f"{f:.0f} FLOPs"
+

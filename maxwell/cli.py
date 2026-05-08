@@ -5,6 +5,7 @@ Maxwell CLI — entry point using Typer.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -16,12 +17,15 @@ from rich.live import Live
 from rich.panel import Panel
 
 from .api import MaxwellServer
+from .auth import APIKeyStore
+from .config import MaxwellConfig
 from .crypto import TEESimulator
 from .dashboard import create_dashboard
 from .models import FunnelStats, Task
 from .oracle import MODELS
 from .p2p import P2PManager
 from .proxy import PruningProxy
+from .settlement import SettlementHandler, Web3Relayer
 
 app = typer.Typer(
     name="maxwell",
@@ -46,7 +50,7 @@ def serve(
     mode: str = typer.Option("server", help="Run mode: 'server' or 'simulate'"),
     host: str = typer.Option("0.0.0.0", help="Bind host"),
     port: int = typer.Option(8080, help="Bind port"),
-    config: str = typer.Option("rules.json", help="Rules config path"),
+    rules: str = typer.Option("rules.json", help="Rules config path"),
     log: str = typer.Option("logs/maxwell_access.jsonl", help="Structured log path"),
     rate: float = typer.Option(0.01, help="Simulation request interval (seconds)"),
     entropy_low: float = typer.Option(1.0, help="Low entropy threshold"),
@@ -62,67 +66,86 @@ def serve(
     backend_type: str = typer.Option("ollama", help="Backend type: ollama, openai, vllm"),
     bootstrap_node: str = typer.Option("", help="Kademlia bootstrap node (IP:PORT)"),
     public_ip: str = typer.Option("127.0.0.1", help="Public IP to broadcast in DHT"),
+    api_keys: str = typer.Option("", help="Path to API keys JSON file (auth disabled if empty)"),
+    config: str = typer.Option("", help="Path to maxwell.toml config file"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
 ) -> None:
     """Start Maxwell proxy in server or simulation mode."""
-    _setup_logging(verbose)
+    # ── Load config: TOML → env → defaults ────────────────────────
+    if config and os.path.exists(config):
+        cfg = MaxwellConfig.from_toml(config)
+        console.print(f"[dim]📄 Loaded config from {config}[/dim]")
+    else:
+        cfg = MaxwellConfig.from_env()
+
+    # CLI args override TOML/env (only when explicitly set)
+    cfg.merge_cli_args(
+        host=host, port=port, mode=mode, role=role,
+        entropy_low=entropy_low, entropy_high=entropy_high,
+        workers=workers, model_name=model_name, max_seq_length=max_seq,
+        backend_url=backend_url, backend_type=backend_type,
+        bootstrap_node=bootstrap_node, public_ip=public_ip,
+        price=price, api_keys_path=api_keys,
+        log_path=log, verbose=verbose, rules_path=rules,
+        sim_rate=rate,
+    )
+
+    _setup_logging(cfg.verbose)
     node_id = f"node-{os.getpid()}-{random.randint(1000, 9999)}"
-    asyncio.run(_run(
-        mode, host, port, config, log, rate,
-        entropy_low, entropy_high, workers,
-        model_name, max_seq, role, price, node_id,
-        backend_url, backend_type, bootstrap_node, public_ip,
-    ))
+    asyncio.run(_run(cfg, node_id))
 
 
-async def _run(
-    mode: str, host: str, port: int, config: str, log: str, rate: float,
-    entropy_low: float, entropy_high: float, workers: int,
-    model_name: str, max_seq: int, role: str, price: float, node_id: str,
-    backend_url: str, backend_type: str, bootstrap_node: str, public_ip: str,
-) -> None:
-    os.makedirs(os.path.dirname(log) or ".", exist_ok=True)
+async def _run(cfg: MaxwellConfig, node_id: str) -> None:
+    os.makedirs(os.path.dirname(cfg.log_path) or ".", exist_ok=True)
 
-    if role == "settlement":
-        import uvicorn
-        console.print(Panel(
-            f"[bold cyan]⚡ Maxwell Settlement Node[/bold cyan] — Listening on {host}:{port}",
-            subtitle="Role: SETTLEMENT",
-        ))
-        # Run FastAPI app
-        uvicorn.run("maxwell.settlement:app", host=host, port=port, log_level="info")
-        return
+    # ── API Key Authentication ─────────────────────────────────────
+    key_store = APIKeyStore()
+    key_store.load_from_env()
+    if cfg.api_keys_path:
+        key_store.load_from_file(cfg.api_keys_path)
+    if key_store.enabled:
+        console.print(f"[green]🔒 API auth enabled ({len(key_store)} key(s))[/green]")
+    else:
+        console.print("[yellow]⚠️  API auth disabled (no keys configured)[/yellow]")
+
+    # ── Settlement handler (for settlement role) ───────────────────
+    settlement_handler = None
+    if cfg.role == "settlement":
+        settlement_handler = SettlementHandler(Web3Relayer())
 
     tee = None
-    if role in ("provider", "standalone"):
+    if cfg.role in ("provider", "standalone"):
         tee = TEESimulator()
-        
+
     p2p_manager = None
-    if role in ("provider", "consumer"):
-        p2p_manager = P2PManager(node_id, role, port, price, model_name, bootstrap_node, public_ip)
+    if cfg.role in ("provider", "consumer"):
+        p2p_manager = P2PManager(
+            node_id, cfg.role, cfg.port, cfg.price,
+            cfg.model_name, cfg.bootstrap_node, cfg.public_ip,
+        )
         await p2p_manager.start()
-        
-    model = MODELS.get(model_name)
+
+    model = MODELS.get(cfg.model_name)
     if not model:
-        logger.error(f"Unknown model {model_name}. Valid options: {list(MODELS.keys())}")
+        logger.error("Unknown model %s. Valid options: %s", cfg.model_name, list(MODELS.keys()))
         model = MODELS["llama-7b"]
 
     stats = FunnelStats()
     proxy = PruningProxy(
         stats,
-        worker_count=workers,
+        worker_count=cfg.workers,
         model=model,
-        max_seq_length=max_seq,
-        role=role,
+        max_seq_length=cfg.max_seq_length,
+        role=cfg.role,
         p2p_manager=p2p_manager,
         tee=tee,
-        backend_url=backend_url,
-        backend_type=backend_type,
+        backend_url=cfg.backend_url,
+        backend_type=cfg.backend_type,
     )
-    proxy.entropy_low = entropy_low
-    proxy.entropy_high = entropy_high
+    proxy.entropy_low = cfg.entropy_low
+    proxy.entropy_high = cfg.entropy_high
 
-    await proxy.reload_rules(config)
+    await proxy.reload_rules(cfg.rules_path)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -130,24 +153,28 @@ async def _run(
 
     tasks: list[asyncio.Task[None]] = [
         *proxy.create_funnel_tasks(),
-        asyncio.create_task(proxy.config_watcher(config), name="config-watcher"),
-        asyncio.create_task(proxy.log_worker(log), name="log-worker"),
+        asyncio.create_task(proxy.config_watcher(cfg.rules_path), name="config-watcher"),
+        asyncio.create_task(proxy.log_worker(cfg.log_path), name="log-worker"),
     ]
 
-    if mode == "simulate":
+    if cfg.mode == "simulate":
         tasks.append(
-            asyncio.create_task(_simulate_producer(proxy, rate), name="simulator")
+            asyncio.create_task(_simulate_producer(proxy, cfg.sim_rate), name="simulator")
         )
         console.print(Panel(
             "[bold green]⚡ Maxwell Protocol[/bold green] — Simulation Mode",
-            subtitle=f"Phase 7 · {workers} workers · {model.name}",
+            subtitle=f"Phase 7 · {cfg.workers} workers · {model.name}",
         ))
     else:
-        server = MaxwellServer(proxy, host=host, port=port)
+        server = MaxwellServer(
+            proxy, host=cfg.host, port=cfg.port,
+            api_key_store=key_store,
+            settlement_handler=settlement_handler,
+        )
         await server.start()
         console.print(Panel(
-            f"[bold cyan]⚡ Maxwell Protocol[/bold cyan] — Listening on {host}:{port}",
-            subtitle=f"Role: {role.upper()} · Mode: {mode} · Model: {model.name}",
+            f"[bold cyan]⚡ Maxwell Protocol[/bold cyan] — Listening on {cfg.host}:{cfg.port}",
+            subtitle=f"Role: {cfg.role.upper()} · Mode: {cfg.mode} · Model: {model.name}",
         ))
 
     with Live(
@@ -198,12 +225,120 @@ async def _simulate_producer(proxy: PruningProxy, rate: float) -> None:
     while proxy.is_running:
         payload = random.choice(samples)
         task = Task(id=task_id, payload=payload)
-        proxy.stats.total_requests += 1
+        # total_requests is tracked inside process_stream(); no duplicate increment
         task_id += 1
-        
+
         asyncio.create_task(_run_stream(task))
-        
+
         await asyncio.sleep(rate)
 
 if __name__ == "__main__":
     app()
+
+
+@app.command()
+def init(
+    directory: str = typer.Argument(".", help="Directory to initialize"),
+    with_key: bool = typer.Option(True, help="Generate an API key pair"),
+) -> None:
+    """Initialize a Maxwell project with config files and API keys."""
+    from .auth import generate_api_key
+
+    target = os.path.abspath(directory)
+    os.makedirs(target, exist_ok=True)
+
+    # ── maxwell.toml ─────────────────────────────────────────────
+    toml_path = os.path.join(target, "maxwell.toml")
+    if not os.path.exists(toml_path):
+        toml_content = (
+            "# Maxwell Protocol Configuration\n"
+            "# Docs: https://github.com/maxwell-protocol/maxwell\n\n"
+            "[server]\n"
+            'host = "0.0.0.0"\n'
+            "port = 8080\n"
+            'mode = "server"\n'
+            'role = "standalone"\n\n'
+            "[funnel]\n"
+            "entropy_low = 1.0\n"
+            "entropy_high = 4.5\n"
+            "workers = 2\n"
+            'rules_path = "rules.json"\n\n'
+            "[model]\n"
+            'name = "llama-7b"\n'
+            "max_seq_length = 8192\n\n"
+            "[backend]\n"
+            'backend_url = ""\n'
+            'backend_type = "ollama"\n\n'
+            "[auth]\n"
+            'api_keys_path = "api_keys.json"\n\n'
+            "[logging]\n"
+            'log_path = "logs/maxwell_access.jsonl"\n'
+            "verbose = false\n"
+        )
+        with open(toml_path, "w") as f:
+            f.write(toml_content)
+        console.print(f"  [green]\u2713[/green] Created {toml_path}")
+    else:
+        console.print(f"  [dim]\u23ed {toml_path} already exists[/dim]")
+
+    # ── rules.json ───────────────────────────────────────────────
+    rules_path = os.path.join(target, "rules.json")
+    if not os.path.exists(rules_path):
+        rules = {
+            "blacklist": [
+                "exec(rm",
+                "DROP TABLE",
+                "<script>",
+                "admin_login",
+            ],
+            "patterns": [
+                "(?i)(password|secret|token)\\s*[:=]",
+                "(?i)ignore\\s+previous\\s+instructions",
+            ],
+        }
+        with open(rules_path, "w") as f:
+            json.dump(rules, f, indent=2)
+        console.print(f"  [green]\u2713[/green] Created {rules_path}")
+    else:
+        console.print(f"  [dim]\u23ed {rules_path} already exists[/dim]")
+
+    # ── API Key ──────────────────────────────────────────────────
+    keys_path = os.path.join(target, "api_keys.json")
+    if with_key:
+        key_id, secret = generate_api_key()
+        keys_data: dict = {"keys": {}}
+        if os.path.exists(keys_path):
+            with open(keys_path, "r") as f:
+                keys_data = json.load(f)
+        keys_data["keys"][key_id] = secret
+        with open(keys_path, "w") as f:
+            json.dump(keys_data, f, indent=2)
+        console.print(f"  [green]\u2713[/green] API key generated:")
+        console.print(f"    Key ID:  [bold]{key_id}[/bold]")
+        console.print(f"    Secret:  [bold]{secret}[/bold]")
+        console.print(f"    Saved to {keys_path}")
+
+    # ── logs dir ─────────────────────────────────────────────────
+    logs_dir = os.path.join(target, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+
+    console.print(Panel(
+        "[bold green]\u26a1 Maxwell project initialized![/bold green]\n\n"
+        f"  Config:  {toml_path}\n"
+        f"  Rules:   {rules_path}\n\n"
+        "  Start with: [bold]maxwell serve --config maxwell.toml[/bold]",
+        title="Maxwell Init",
+    ))
+
+
+@app.command()
+def keygen() -> None:
+    """Generate a new API key pair."""
+    from .auth import generate_api_key
+
+    key_id, secret = generate_api_key()
+    console.print(f"[bold]Key ID:[/bold]  {key_id}")
+    console.print(f"[bold]Secret:[/bold]  {secret}")
+    console.print()
+    console.print("[dim]Add to env:  export MAXWELL_API_KEYS=" + key_id + ":" + secret + "[/dim]")
+    console.print("[dim]Or to file:  maxwell init --with-key[/dim]")

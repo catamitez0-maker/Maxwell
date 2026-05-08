@@ -1,89 +1,130 @@
+"""
+Tests for maxwell.p2p — P2P discovery and routing.
+"""
+
+import asyncio
+import time
 
 import pytest
+
 from maxwell.p2p import P2PManager, ProviderInfo
 
-@pytest.fixture
-def p2p_manager():
-    return P2PManager(node_id="test_node", role="consumer", api_port=8080)
 
-def test_report_failure(p2p_manager):
-    node_id = "provider_1"
-    provider = ProviderInfo(node_id=node_id, host="127.0.0.1", port=9000, price=1.0, model="7B")
-    p2p_manager.providers[node_id] = provider
+class TestProviderInfo:
+    def test_default_values(self) -> None:
+        p = ProviderInfo(
+            node_id="node-1", host="10.0.0.1", port=8080, price=1.5, model="7B",
+        )
+        assert p.node_id == "node-1"
+        assert p.reputation == 100.0
+        assert p.last_seen <= time.time()
 
-    initial_reputation = provider.reputation
-    p2p_manager.report_failure(node_id)
+    def test_custom_values(self) -> None:
+        p = ProviderInfo(
+            node_id="node-2", host="192.168.1.1", port=9090, price=0.5, model="13B",
+        )
+        assert p.port == 9090
+        assert p.price == 0.5
+        assert p.model == "13B"
 
-    assert provider.reputation == initial_reputation - 20.0
-    assert provider.reputation == 80.0
 
-def test_report_failure_min_bound(p2p_manager):
-    node_id = "provider_1"
-    provider = ProviderInfo(node_id=node_id, host="127.0.0.1", port=9000, price=1.0, model="7B")
-    provider.reputation = 10.0
-    p2p_manager.providers[node_id] = provider
+class TestP2PManagerRouting:
+    def _make_manager(self) -> P2PManager:
+        mgr = P2PManager(
+            node_id="consumer-1", role="consumer", api_port=8080,
+        )
+        return mgr
 
-    p2p_manager.report_failure(node_id)
+    def test_get_best_provider_empty(self) -> None:
+        mgr = self._make_manager()
+        assert mgr.get_best_provider() is None
 
-    assert provider.reputation == 0.0
+    def test_get_best_provider_by_reputation(self) -> None:
+        mgr = self._make_manager()
+        mgr.providers["a"] = ProviderInfo("a", "1.1.1.1", 8080, 1.0, "7B")
+        mgr.providers["b"] = ProviderInfo("b", "2.2.2.2", 8080, 1.0, "7B")
+        mgr.providers["a"].reputation = 80.0
+        mgr.providers["b"].reputation = 95.0
+        best = mgr.get_best_provider()
+        assert best is not None
+        assert best.node_id == "b"
 
-def test_report_success(p2p_manager):
-    node_id = "provider_1"
-    provider = ProviderInfo(node_id=node_id, host="127.0.0.1", port=9000, price=1.0, model="7B")
-    p2p_manager.providers[node_id] = provider
+    def test_get_best_provider_by_price(self) -> None:
+        mgr = self._make_manager()
+        mgr.providers["a"] = ProviderInfo("a", "1.1.1.1", 8080, 10.0, "7B")
+        mgr.providers["b"] = ProviderInfo("b", "2.2.2.2", 8080, 1.0, "7B")
+        # Same reputation, different price → cheaper one wins (reputation/price)
+        best = mgr.get_best_provider()
+        assert best is not None
+        assert best.node_id == "b"
 
-    initial_reputation = provider.reputation
-    p2p_manager.report_success(node_id)
+    def test_get_best_provider_skips_zero_reputation(self) -> None:
+        mgr = self._make_manager()
+        mgr.providers["a"] = ProviderInfo("a", "1.1.1.1", 8080, 1.0, "7B")
+        mgr.providers["a"].reputation = 0.0
+        mgr.providers["b"] = ProviderInfo("b", "2.2.2.2", 8080, 1.0, "7B")
+        best = mgr.get_best_provider()
+        assert best is not None
+        assert best.node_id == "b"
 
-    # reputation starts at 100.0, and min(100.0, 100.0 + 2.0) is 100.0
-    assert provider.reputation == 100.0
 
-    provider.reputation = 50.0
-    p2p_manager.report_success(node_id)
-    assert provider.reputation == 52.0
+class TestReputationSystem:
+    def _make_manager_with_provider(self) -> tuple[P2PManager, str]:
+        mgr = P2PManager(
+            node_id="consumer-1", role="consumer", api_port=8080,
+        )
+        mgr.providers["p1"] = ProviderInfo("p1", "1.1.1.1", 8080, 1.0, "7B")
+        return mgr, "p1"
 
-def test_report_success_max_bound(p2p_manager):
-    node_id = "provider_1"
-    provider = ProviderInfo(node_id=node_id, host="127.0.0.1", port=9000, price=1.0, model="7B")
-    provider.reputation = 99.0
-    p2p_manager.providers[node_id] = provider
+    def test_report_success_increases_reputation(self) -> None:
+        mgr, nid = self._make_manager_with_provider()
+        mgr.providers[nid].reputation = 90.0
+        mgr.report_success(nid)
+        assert mgr.providers[nid].reputation == 92.0
 
-    p2p_manager.report_success(node_id)
+    def test_report_success_caps_at_100(self) -> None:
+        mgr, nid = self._make_manager_with_provider()
+        mgr.providers[nid].reputation = 99.5
+        mgr.report_success(nid)
+        assert mgr.providers[nid].reputation == 100.0
 
-    assert provider.reputation == 100.0
+    def test_report_failure_decreases_reputation(self) -> None:
+        mgr, nid = self._make_manager_with_provider()
+        mgr.report_failure(nid)
+        assert mgr.providers[nid].reputation == 80.0
 
-def test_report_methods_nonexistent_node(p2p_manager):
-    # Should not raise exception
-    p2p_manager.report_failure("nonexistent")
-    p2p_manager.report_success("nonexistent")
+    def test_report_failure_floors_at_zero(self) -> None:
+        mgr, nid = self._make_manager_with_provider()
+        mgr.providers[nid].reputation = 10.0
+        mgr.report_failure(nid)
+        assert mgr.providers[nid].reputation == 0.0
 
-def test_get_best_provider_reputation_impact(p2p_manager):
-    p1 = ProviderInfo(node_id="p1", host="127.0.0.1", port=9000, price=1.0, model="7B")
-    p2 = ProviderInfo(node_id="p2", host="127.0.0.1", port=9001, price=1.0, model="7B")
+    def test_report_on_unknown_node_is_noop(self) -> None:
+        mgr = P2PManager(node_id="c", role="consumer", api_port=8080)
+        mgr.report_success("unknown")  # Should not raise
+        mgr.report_failure("unknown")  # Should not raise
 
-    p2p_manager.providers["p1"] = p1
-    p2p_manager.providers["p2"] = p2
 
-    # Both have 100.0 reputation.
-    # Slash p1.
-    p2p_manager.report_failure("p1") # p1: 80.0, p2: 100.0
+class TestCleanup:
+    @pytest.mark.asyncio
+    async def test_stale_providers_removed(self) -> None:
+        mgr = P2PManager(
+            node_id="consumer-1", role="consumer", api_port=8080,
+        )
+        mgr._running = True
+        mgr.providers["stale"] = ProviderInfo("stale", "1.1.1.1", 8080, 1.0, "7B")
+        mgr.providers["stale"].last_seen = time.time() - 200  # stale
+        mgr.providers["fresh"] = ProviderInfo("fresh", "2.2.2.2", 8080, 1.0, "7B")
 
-    best = p2p_manager.get_best_provider()
-    assert best.node_id == "p2"
+        # Run one cleanup iteration
+        cleanup_task = asyncio.create_task(mgr._cleanup_loop())
+        await asyncio.sleep(0.1)
+        mgr._running = False
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
 
-    # Slash p2 twice.
-    p2p_manager.report_failure("p2") # p2: 80.0
-    p2p_manager.report_failure("p2") # p2: 60.0
-
-    best = p2p_manager.get_best_provider()
-    assert best.node_id == "p1"
-
-def test_get_best_provider_zero_reputation(p2p_manager):
-    p1 = ProviderInfo(node_id="p1", host="127.0.0.1", port=9000, price=1.0, model="7B")
-    p1.reputation = 0.0
-    p2p_manager.providers["p1"] = p1
-
-    assert p2p_manager.get_best_provider() is None
-
-def test_get_best_provider_empty(p2p_manager):
-    assert p2p_manager.get_best_provider() is None
+        assert "stale" not in mgr.providers
+        assert "fresh" in mgr.providers

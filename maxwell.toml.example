@@ -1,0 +1,35 @@
+# Maxwell Protocol — Example Configuration
+# Copy to your project root and customize.
+# CLI arguments override these values.
+
+[server]
+host = "0.0.0.0"
+port = 8080
+mode = "server"
+role = "standalone"
+
+[funnel]
+entropy_low = 1.0
+entropy_high = 4.5
+workers = 2
+rules_path = "rules.json"
+
+[model]
+name = "llama-7b"
+max_seq_length = 8192
+
+[backend]
+backend_url = ""
+backend_type = "ollama"
+
+[p2p]
+bootstrap_node = ""
+public_ip = "127.0.0.1"
+price = 1.0
+
+[auth]
+api_keys_path = ""
+
+[logging]
+log_path = "logs/maxwell_access.jsonl"
+verbose = false

@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
-    command: ["maxwell", "serve", "--role", "settlement", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["maxwell", "serve", "--role", "settlement", "--host", "0.0.0.0", "--port", "8000", "--mode", "server"]
     logging:
       driver: json-file
 

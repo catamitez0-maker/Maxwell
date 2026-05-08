@@ -3,6 +3,10 @@ maxwell.p2p — Lightweight P2P Discovery and Routing
 
 Implements a Kademlia DHT-based node discovery mechanism for the global network.
 Allows Consumer nodes to find Provider nodes automatically across WANs.
+
+Requires `maxwell-protocol[p2p]` extras (kademlia).
+When kademlia is not installed, importing this module succeeds but
+P2PManager raises ImportError on instantiation.
 """
 
 from __future__ import annotations
@@ -13,13 +17,30 @@ import logging
 import time
 from typing import Any, cast
 
-from kademlia.network import Server
-import socket
-
 logger = logging.getLogger("maxwell.p2p")
+
+# ── Lazy dependency probing ──────────────────────────────────────────
+
+try:
+    from kademlia.network import Server as _KademliaServer
+    import socket
+
+    HAS_KADEMLIA = True
+except ImportError:
+    HAS_KADEMLIA = False
 
 INDEX_KEY = "maxwell:providers_index"
 DHT_PORT_BASE = 8468
+
+
+def _require_kademlia() -> None:
+    """Raise a clear error if kademlia is not installed."""
+    if not HAS_KADEMLIA:
+        raise ImportError(
+            "P2P features require kademlia. "
+            "Install with: pip install maxwell-protocol[p2p]"
+        )
+
 
 class ProviderInfo:
     def __init__(self, node_id: str, host: str, port: int, price: float, model: str):
@@ -31,8 +52,11 @@ class ProviderInfo:
         self.last_seen: float = time.time()
         self.reputation: float = 100.0  # Reputation score [0-100]
 
+
 class P2PManager:
     def __init__(self, node_id: str, role: str, api_port: int, price: float = 1.0, model: str = "7B", bootstrap_node: str = "", public_ip: str = "127.0.0.1"):
+        _require_kademlia()
+
         self.node_id = node_id
         self.role = role
         self.api_port = api_port
@@ -44,8 +68,12 @@ class P2PManager:
         self._running = False
         self._announce_task: asyncio.Task[None] | None = None
         self._discover_task: asyncio.Task[None] | None = None
-        self.dht_server = Server()
-        
+        self._dht_lock = asyncio.Lock()
+        self.dht_server = _KademliaServer()
+
+    # Alias for type annotations when kademlia is missing
+    protocol = property(lambda self: self)
+
     def _get_available_port(self, start_port: int) -> int:
         for port in range(start_port, start_port + 100):
             try:
@@ -58,12 +86,12 @@ class P2PManager:
 
     async def start(self) -> None:
         self._running = True
-        
+
         # Start DHT Server
         dht_port = self._get_available_port(DHT_PORT_BASE)
         await self.dht_server.listen(dht_port)
         logger.info("Kademlia DHT Node '%s' listening on UDP %d (Role: %s)", self.node_id, dht_port, self.role)
-        
+
         if self.bootstrap_node:
             try:
                 host, port_str = self.bootstrap_node.split(":")
@@ -71,13 +99,13 @@ class P2PManager:
                 logger.info("Bootstrapped DHT with node %s", self.bootstrap_node)
             except Exception as e:
                 logger.warning("Failed to bootstrap with %s: %s", self.bootstrap_node, e)
-        
+
         if self.role == "provider":
             self._announce_task = asyncio.create_task(self._announce_loop())
-            
+
         if self.role == "consumer":
             self._discover_task = asyncio.create_task(self._discover_loop())
-            
+
         asyncio.create_task(self._cleanup_loop())
 
     async def _announce_loop(self) -> None:
@@ -93,29 +121,30 @@ class P2PManager:
             }
             try:
                 await self.dht_server.set(provider_key, json.dumps(info))
-                
-                # Update global index
-                index_data = await self.dht_server.get(INDEX_KEY)
-                node_list = []
-                if index_data:
-                    try:
-                        node_list = json.loads(index_data)
-                        if not isinstance(node_list, list):
-                            node_list = []
-                    except Exception:
-                        pass
-                        
-                if self.node_id not in node_list:
-                    node_list.append(self.node_id)
-                    # Keep index relatively clean
-                    if len(node_list) > 100:
-                        node_list = node_list[-100:]
-                    await self.dht_server.set(INDEX_KEY, json.dumps(node_list))
-                
+
+                # Update global index (protected against concurrent announces)
+                async with self._dht_lock:
+                    index_data = await self.dht_server.get(INDEX_KEY)
+                    node_list = []
+                    if index_data:
+                        try:
+                            node_list = json.loads(index_data)
+                            if not isinstance(node_list, list):
+                                node_list = []
+                        except Exception:
+                            pass
+
+                    if self.node_id not in node_list:
+                        node_list.append(self.node_id)
+                        # Keep index relatively clean
+                        if len(node_list) > 100:
+                            node_list = node_list[-100:]
+                        await self.dht_server.set(INDEX_KEY, json.dumps(node_list))
+
                 logger.debug("Provider %s announced to DHT", self.node_id)
             except Exception as e:
                 logger.debug("DHT announce failed: %s", e)
-                
+
             await asyncio.sleep(30.0)
 
     async def _discover_loop(self) -> None:
@@ -129,7 +158,7 @@ class P2PManager:
                             # Avoid querying ourselves
                             if nid == self.node_id:
                                 continue
-                            
+
                             provider_key = f"maxwell:provider:{nid}"
                             p_data = await self.dht_server.get(provider_key)
                             if p_data:
@@ -154,7 +183,7 @@ class P2PManager:
                                     pass
             except Exception as e:
                 logger.debug("DHT discovery failed: %s", e)
-                
+
             await asyncio.sleep(15.0)
 
     async def _cleanup_loop(self) -> None:
@@ -181,7 +210,7 @@ class P2PManager:
         p = self.providers.get(node_id)
         if p:
             p.reputation = max(0.0, p.reputation - 20.0)
-            logger.warning(f"[Slashing] Provider {node_id} slashed. New reputation: {p.reputation:.1f}")
+            logger.warning("[Slashing] Provider %s slashed. New reputation: %.1f", node_id, p.reputation)
 
     async def stop(self) -> None:
         self._running = False

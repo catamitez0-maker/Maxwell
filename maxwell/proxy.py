@@ -13,6 +13,7 @@ Implements the full 5-layer pruning funnel + oracle metering:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -20,37 +21,18 @@ import re
 import time
 from typing import Any, AsyncGenerator
 
-import aiohttp
 from .crypto import TEESimulator, TEEQuote
+from .execution import execute_stream
 from .filters import BloomFilter, entropy_gate, regex_gate, repetition_gate
 from .models import Decision, FunnelStats, Task
 from .oracle import FLOPsExceeded, FLOPsLimiter, TaskBudget, ModelConfig, MODELS
 from .p2p import P2PManager
+from .qos import ClientBucketManager, TokenBucket
+from .routing import route_to_provider
 
 __all__ = ["PruningProxy", "TokenBucket"]
 
 logger = logging.getLogger("maxwell.proxy")
-
-
-class TokenBucket:
-    """Per-client rate limiting via token bucket algorithm."""
-    def __init__(self, capacity: float, fill_rate: float):
-        self.capacity = capacity
-        self.fill_rate = fill_rate
-        self.tokens = capacity
-        self.last_update = time.time()
-
-    def consume(self, tokens: float = 1.0) -> bool:
-        now = time.time()
-        # Add tokens based on elapsed time
-        elapsed = now - self.last_update
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.fill_rate)
-        self.last_update = now
-
-        if self.tokens >= tokens:
-            self.tokens -= tokens
-            return True
-        return False
 
 
 class PruningProxy:
@@ -104,10 +86,9 @@ class PruningProxy:
         self._circuit_recover_threshold = 0.4  # load ratio to recover
         
         # QoS Multi-tenant Token Buckets
-        self.client_buckets: dict[str, TokenBucket] = {}
-        # Default bucket: max 5 concurrent requests, refilling 1 request per second
-        self.bucket_capacity = 5.0
-        self.bucket_fill_rate = 1.0
+        self.bucket_manager = ClientBucketManager(
+            capacity=5.0, fill_rate=1.0, max_buckets=10_000,
+        )
 
         self._last_config_mtime: float = 0.0
 
@@ -172,66 +153,71 @@ class PruningProxy:
                 logger.info("Circuit breaker CLOSED — load recovered")
                 self.stats.is_circuit_open = False
 
+    # ── Unified Filter Pipeline ───────────────────────────────────
+
+    async def _run_filters(self, task: Task, load: float = 0.0) -> str | None:
+        """
+        Run L1-L5 filters on a task.
+
+        Returns None if the task passes all filters, or a reason string
+        if it should be blocked.
+        """
+        payload = task.payload
+
+        # Circuit Breaker
+        if self.stats.is_circuit_open:
+            await self.stats.increment("circuit_blocked")
+            return "Circuit Breaker Open"
+
+        # L1: Bloom Filter
+        if payload in self.bloom:
+            await self.stats.increment("bloom_blocked")
+            return "L1: Bloom Filter"
+
+        # L2: Regex Rules
+        if regex_gate(payload, self.rules):
+            await self.stats.increment("regex_blocked")
+            return "L2: Regex Rule"
+
+        # L3: Shannon Entropy
+        if entropy_gate(payload, self.entropy_low, self.entropy_high, load):
+            await self.stats.increment("entropy_blocked")
+            return "L3: Entropy"
+
+        # L5: Anti-Idle Repetition
+        if repetition_gate(payload):
+            await self.stats.increment("repetition_blocked")
+            return "L5: Repetition"
+
+        return None
+
     # ── Streaming Proxy Engine ─────────────────────────────────────
 
     async def process_stream(self, task: Task, client_msg_queue: asyncio.Queue | None = None) -> AsyncGenerator[str, None]:
         """
         Stream back the result of the proxy.
-        Runs L1-L5 inline. If it passes, yields simulated LLM tokens
-        and meters FLOPs strictly.
+        Runs L0 QoS + L1-L5 inline. If it passes, delegates to
+        execution engine or consumer router.
         """
-        self.stats.active_streams += 1
+        await self.stats.increment("active_streams")
+        await self.stats.increment("total_requests")
         load = self.stats.active_streams / 100.0
         self.stats.current_load = load
         self._update_circuit_breaker(load)
 
         try:
-            payload = task.payload
-            
             # L0: QoS Multi-tenant Token Bucket Limit
-            bucket = self.client_buckets.setdefault(
-                task.client_id, 
-                TokenBucket(self.bucket_capacity, self.bucket_fill_rate)
-            )
-            if not bucket.consume(1.0):
-                self.stats.qos_blocked += 1
+            if not await self.bucket_manager.consume(task.client_id, 1.0):
+                await self.stats.increment("qos_blocked")
                 await self._record(task, Decision.BLOCKED, "L0: QoS Rate Limited")
                 yield '{"error": "Blocked by QoS: Rate Limit Exceeded"}'
                 return
 
-            # L4 (Circuit Breaker)
-            if self.stats.is_circuit_open:
-                self.stats.circuit_blocked += 1
-                await self._record(task, Decision.BLOCKED, "Circuit Breaker Open")
-                yield '{"error": "service overloaded"}'
-                return
-
-            # L1: Bloom Filter
-            if payload in self.bloom:
-                self.stats.bloom_blocked += 1
-                await self._record(task, Decision.BLOCKED, "L1: Bloom Filter")
-                yield '{"error": "Blocked by L1: Bloom Filter"}'
-                return
-
-            # L2: Regex Rules
-            if regex_gate(payload, self.rules):
-                self.stats.regex_blocked += 1
-                await self._record(task, Decision.BLOCKED, "L2: Regex Rule")
-                yield '{"error": "Blocked by L2: Regex Rule"}'
-                return
-
-            # L3: Shannon Entropy
-            if entropy_gate(payload, self.entropy_low, self.entropy_high, load):
-                self.stats.entropy_blocked += 1
-                await self._record(task, Decision.BLOCKED, "L3: Entropy")
-                yield '{"error": "Blocked by L3: Entropy"}'
-                return
-
-            # L5: Anti-Idle Repetition
-            if repetition_gate(payload):
-                self.stats.repetition_blocked += 1
-                await self._record(task, Decision.BLOCKED, "L5: Repetition")
-                yield '{"error": "Blocked by L5: Repetition"}'
+            # L1-L5 Unified Filter Pipeline
+            block_reason = await self._run_filters(task, load)
+            if block_reason is not None:
+                await self._record(task, Decision.BLOCKED, block_reason)
+                yield json.dumps({"error": f"Blocked by {block_reason}"})
                 return
 
             # P2P Consumer Routing Logic
@@ -239,245 +225,40 @@ class PruningProxy:
                 if not self.p2p_manager:
                     yield '{"error": "Consumer mode requires P2PManager"}'
                     return
-                provider = self.p2p_manager.get_best_provider()
-                if not provider:
-                    yield '{"error": "No available providers on the P2P network"}'
-                    return
-                
-                # Forward to Provider via WebSocket
-                url = f"ws://{provider.host}:{provider.port}/v1/proxy"
-                self.stats.passed_to_engine += 1
-                await self._record(task, Decision.PASSED, f"Routed to Provider {provider.node_id}")
-                yield f"[Consumer] Routing task to Provider {provider.node_id} (Price: {provider.price})\n\n"
-                
-                async with aiohttp.ClientSession() as session:
-                    try:
-                        async with session.ws_connect(url) as ws:
-                            await ws.send_json({"payload": payload, "token_estimate": task.token_estimate})
-                            
-                            buffer = ""
-                            async for msg in ws:
-                                if msg.type == aiohttp.WSMsgType.TEXT:
-                                    text_chunk = msg.data
-                                    
-                                    # Handle micropayment requests
-                                    if text_chunk.startswith("<REQUEST_PAYMENT_NONCE:"):
-                                        nonce_str = text_chunk.replace("<REQUEST_PAYMENT_NONCE:", "").replace(">", "").strip()
-                                        try:
-                                            nonce = int(nonce_str)
-                                            # Sign the nonce as consumer
-                                            if self.tee:
-                                                micro_quote = self.tee.sign_execution(task.id, nonce)
-                                                await ws.send_json({
-                                                    "signature": micro_quote.signature_hex,
-                                                    "flops_actual": nonce,
-                                                    "public_key": micro_quote.public_key,
-                                                    "mrenclave": micro_quote.mrenclave,
-                                                    "certificate_chain": micro_quote.certificate_chain
-                                                })
-                                        except ValueError:
-                                            pass
-                                        continue
-                                        
-                                    buffer += text_chunk
-                                
-                                marker_idx = buffer.find("<TEE_SIGNATURE>")
-                                if marker_idx != -1:
-                                    if marker_idx > 0:
-                                        yield buffer[:marker_idx]
-                                    buffer = buffer[marker_idx:]
-                                else:
-                                    if len(buffer) > 20:
-                                        yield buffer[:-20]
-                                        buffer = buffer[-20:]
-                            
-                            if buffer:
-                                if buffer.startswith("<TEE_SIGNATURE>"):
-                                    try:
-                                        sig_json = buffer.replace("<TEE_SIGNATURE>", "").replace("\n", "").replace("<DONE>", "").strip()
-                                        sig_data = json.loads(sig_json)
-                                        quote = TEEQuote(
-                                            public_key=sig_data["public_key"],
-                                            flops_actual=sig_data["flops_actual"],
-                                            signature_hex=sig_data["signature"],
-                                            mrenclave=sig_data.get("mrenclave", ""),
-                                            certificate_chain=sig_data.get("certificate_chain", [])
-                                        )
-                                        is_valid = TEESimulator.verify_execution(quote, task.id)
-                                        if not is_valid:
-                                            self.p2p_manager.report_failure(provider.node_id)
-                                            yield "\n\n[Consumer Warning] Invalid TEE Signature detected! Provider slashed.\n"
-                                        else:
-                                            self.p2p_manager.report_success(provider.node_id)
-                                            yield f"\n\n[Consumer Info] TEE Signature Verified OK. FLOPs: {sig_data['flops_actual']}\n"
-                                    except Exception as e:
-                                        self.p2p_manager.report_failure(provider.node_id)
-                                        yield f"\n\n[Consumer Warning] Malformed TEE Signature! Provider slashed. ({e})\n"
-                                else:
-                                    yield buffer
-                                    self.p2p_manager.report_success(provider.node_id)
-                    except Exception as e:
-                        self.p2p_manager.report_failure(provider.node_id)
-                        yield f"\n\n<Error communicating with Provider: {e}>"
+                await self.stats.increment("passed_to_engine")
+                await self._record(task, Decision.PASSED, "Routed to Provider")
+                async for chunk in route_to_provider(task, self.p2p_manager, self.tee):
+                    yield chunk
                 return
 
-            # Provider / Standalone Execution Logic
-            
-            # L4: Oracle FLOPs Budget Creation
+            # Provider / Standalone: L4 Oracle FLOPs Budget
             try:
                 budget = self.oracle_limiter.create_task_budget(task.token_estimate)
-                self.stats.total_flops_estimated += budget.consumed_flops
+                await self.stats.increment("total_flops_estimated", budget.consumed_flops)
             except FLOPsExceeded:
-                self.stats.oracle_blocked += 1
-                if self.role == "consumer" and self.p2p_manager and provider:
-                    self.p2p_manager.report_failure(provider.node_id)
+                await self.stats.increment("oracle_blocked")
                 await self._record(task, Decision.BLOCKED, "L4: FLOPs Budget Exceeded (Prefill)")
                 yield '{"error": "Blocked by L4: Budget Exceeded on Input"}'
                 return
 
-            # Passed filters
-            self.stats.passed_to_engine += 1
+            # Passed all filters — execute
+            await self.stats.increment("passed_to_engine")
             await self._record(task, Decision.PASSED, "Passed to Execution Engine")
-            
-            actual_tokens_generated = 0
-            
-            if self.backend_url:
-                # Proxy to actual LLM backend
-                async with aiohttp.ClientSession() as session:
-                    if self.backend_type == "ollama":
-                        payload_data = {
-                            "model": self.model.name,
-                            "prompt": task.payload,
-                            "stream": True
-                        }
-                        try:
-                            async with session.post(self.backend_url, json=payload_data) as resp:
-                                async for chunk in resp.content.iter_any():
-                                    text = chunk.decode("utf-8")
-                                    # Ollama sends NDJSON lines
-                                    for line in text.splitlines():
-                                        if not line.strip():
-                                            continue
-                                        try:
-                                            data = json.loads(line)
-                                            if "response" in data:
-                                                word = data["response"]
-                                                budget.consume_tokens(1) # approximate 1 token
-                                                actual_tokens_generated += 1
-                                                self.stats.total_flops_estimated += 2.0 * self.model.active_params * 1
-                                                
-                                                if client_msg_queue and actual_tokens_generated % 10 == 0:
-                                                    yield f"<REQUEST_PAYMENT_NONCE:{actual_tokens_generated}>"
-                                                    try:
-                                                        client_msg = await asyncio.wait_for(client_msg_queue.get(), timeout=2.0)
-                                                        if "signature" not in client_msg:
-                                                            yield "\n\n<TRUNCATED: Invalid micro-payment format!>"
-                                                            break
-                                                            
-                                                        from .crypto import TEEQuote
-                                                        quote = TEEQuote(
-                                                            public_key=client_msg.get("public_key", ""),
-                                                            flops_actual=client_msg.get("flops_actual", 0),
-                                                            signature_hex=client_msg.get("signature", ""),
-                                                            mrenclave=client_msg.get("mrenclave", ""),
-                                                            certificate_chain=client_msg.get("certificate_chain", [])
-                                                        )
-                                                        
-                                                        # Anti-fraud monotonic check
-                                                        if quote.flops_actual < actual_tokens_generated:
-                                                            yield "\n\n<TRUNCATED: Fraud detected! Nonce decreased.>"
-                                                            break
-                                                            
-                                                        # Verify Consumer's signature
-                                                        if self.tee and not self.tee.verify_execution(quote, task.id):
-                                                            yield "\n\n<TRUNCATED: Invalid micro-payment signature!>"
-                                                            break
-                                                            
-                                                    except asyncio.TimeoutError:
-                                                        yield "\n\n<TRUNCATED: Payment Timeout! Client did not sign nonce.>"
-                                                        break
-                                                        
-                                                yield word
-                                        except json.JSONDecodeError:
-                                            pass
-                                        except FLOPsExceeded:
-                                            yield "\n\n<TRUNCATED: FLOPs Budget Exceeded! Generation stopped.>"
-                                            logger.warning("Stream truncated: Budget exceeded for task %d", task.id)
-                                            break
-                        except Exception as e:
-                            yield f"\n\n<Backend connection error: {e}>"
-                            
-            else:
-                # Simulated Streaming Response
-                yield "Here is the response from the simulated Compute Engine:\n"
-                words = (task.payload * 2).split() + ["\nAnd", "here", "are", "more", "output", "tokens", "generated", "by", "the", "model."] * 10
-                
-                for word in words:
-                    await asyncio.sleep(0.02)  # Simulate GPU latency
-                    try:
-                        budget.consume_tokens(1)  # 1 word ~ 1 token for simplicity
-                        # Add decoding FLOPs to global stats
-                        actual_tokens_generated += 1
-                        self.stats.total_flops_estimated += 2.0 * self.model.active_params * 1
-                        
-                        if client_msg_queue and actual_tokens_generated % 10 == 0:
-                            yield f"<REQUEST_PAYMENT_NONCE:{actual_tokens_generated}>"
-                            try:
-                                client_msg = await asyncio.wait_for(client_msg_queue.get(), timeout=2.0)
-                                if "signature" not in client_msg:
-                                    yield "\n\n<TRUNCATED: Invalid micro-payment format!>"
-                                    break
-                                    
-                                from .crypto import TEEQuote
-                                quote = TEEQuote(
-                                    public_key=client_msg.get("public_key", ""),
-                                    flops_actual=client_msg.get("flops_actual", 0),
-                                    signature_hex=client_msg.get("signature", ""),
-                                    mrenclave=client_msg.get("mrenclave", ""),
-                                    certificate_chain=client_msg.get("certificate_chain", [])
-                                )
-                                
-                                # Anti-fraud monotonic check
-                                if quote.flops_actual < actual_tokens_generated:
-                                    yield "\n\n<TRUNCATED: Fraud detected! Nonce decreased.>"
-                                    break
-                                    
-                                # Verify Consumer's signature
-                                if self.tee and not self.tee.verify_execution(quote, task.id):
-                                    yield "\n\n<TRUNCATED: Invalid micro-payment signature!>"
-                                    break
-                                    
-                            except asyncio.TimeoutError:
-                                yield "\n\n<TRUNCATED: Payment Timeout! Client did not sign nonce.>"
-                                break
-                                
-                        yield word + " "
-                    except FLOPsExceeded:
-                        yield "\n\n<TRUNCATED: FLOPs Budget Exceeded! Generation stopped.>"
-                        logger.warning("Stream truncated: Budget exceeded for task %d", task.id)
-                        break
-            
-            # TEE Cryptographic Signature Generation
-            if self.tee:
-                # Sign the exact actual FLOPs used for this task budget
-                actual_flops = int(budget.consumed_flops)
-                quote = self.tee.sign_execution(task.id, actual_flops)
-                
-                tee_payload = {
-                    "public_key": quote.public_key,
-                    "flops_actual": quote.flops_actual,
-                    "signature": quote.signature_hex,
-                    "mrenclave": quote.mrenclave,
-                    "certificate_chain": quote.certificate_chain
-                }
-                yield f"\n\n<TEE_SIGNATURE> {json.dumps(tee_payload)}\n"
-                logger.info(f"[TEE Attestation Signature generated] for Task {task.id} with {actual_flops} FLOPs.")
-                
-            # If we successfully completed the local simulation as provider
-            # (In reality, Consumer only routes, Standalone does both, Provider only runs execution).
-            yield "\n<DONE>"
+
+            async for chunk in execute_stream(
+                task=task,
+                model=self.model,
+                budget=budget,
+                stats=self.stats,
+                tee=self.tee,
+                backend_url=self.backend_url,
+                backend_type=self.backend_type,
+                client_msg_queue=client_msg_queue,
+            ):
+                yield chunk
+
         finally:
-            self.stats.active_streams -= 1
+            await self.stats.decrement("active_streams")
             self.stats.current_load = self.stats.active_streams / 100.0
 
     # ── Funnel decision engine (Background Queue worker) ────────────
@@ -502,41 +283,20 @@ class PruningProxy:
             # Update circuit breaker state
             self._update_circuit_breaker(load)
 
-            # ── Circuit Breaker ──
-            if self.stats.is_circuit_open:
-                self.stats.circuit_blocked += 1
-                await self._record(task, Decision.BLOCKED, "Circuit Breaker Open")
-
-            # ── L1: Bloom Filter ──
-            elif payload in self.bloom:
-                self.stats.bloom_blocked += 1
-                await self._record(task, Decision.BLOCKED, "L1: Bloom Filter")
-
-            # ── L2: Regex Rules ──
-            elif regex_gate(payload, self.rules):
-                self.stats.regex_blocked += 1
-                await self._record(task, Decision.BLOCKED, "L2: Regex Rule")
-
-            # ── L3: Shannon Entropy ──
-            elif entropy_gate(payload, self.entropy_low, self.entropy_high, load):
-                self.stats.entropy_blocked += 1
-                await self._record(task, Decision.BLOCKED, "L3: Entropy")
-
-            # ── L5: Anti-Idle Repetition ──
-            elif repetition_gate(payload):
-                self.stats.repetition_blocked += 1
-                await self._record(task, Decision.BLOCKED, "L5: Repetition (Anti-Idle)")
-
-            # ── L4: Oracle FLOPs Budget ──
+            # Run unified filter pipeline
+            block_reason = await self._run_filters(task, load)
+            if block_reason is not None:
+                await self._record(task, Decision.BLOCKED, block_reason)
             else:
+                # L4: Oracle FLOPs Budget
                 try:
                     est = self.oracle_limiter.check(task.token_estimate)
-                    self.stats.total_flops_estimated += est.total_flops
-                    self.stats.passed_to_engine += 1
+                    await self.stats.increment("total_flops_estimated", est.total_flops)
+                    await self.stats.increment("passed_to_engine")
                     await self._record(task, Decision.PASSED, f"FLOPs: {est.total_flops:.2e}")
                     await self.output_queue.put(task)
                 except FLOPsExceeded:
-                    self.stats.oracle_blocked += 1
+                    await self.stats.increment("oracle_blocked")
                     await self._record(task, Decision.BLOCKED, "L4: FLOPs Budget Exceeded")
 
             self.input_queue.task_done()
@@ -561,28 +321,31 @@ class PruningProxy:
     # ── Structured JSON logger ─────────────────────────────────────
 
     async def log_worker(self, log_path: str) -> None:
-        while self.is_running:
-            try:
-                entry = await asyncio.wait_for(self.log_queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            line = json.dumps(entry, ensure_ascii=False) + "\n"
-            try:
-                await asyncio.to_thread(self._write_log_line, log_path, line)
-            except OSError as exc:
-                logger.error("Log write failed: %s", exc)
-            self.log_queue.task_done()
-
-    @staticmethod
-    def _write_log_line(path: str, line: str) -> None:
-        with open(path, "a") as f:
-            f.write(line)
+        f = await asyncio.to_thread(open, log_path, "a", buffering=8192)
+        try:
+            while self.is_running:
+                try:
+                    entry = await asyncio.wait_for(self.log_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    await asyncio.to_thread(f.flush)
+                    continue
+                line = json.dumps(entry, ensure_ascii=False) + "\n"
+                try:
+                    await asyncio.to_thread(f.write, line)
+                    if self.log_queue.empty():
+                        await asyncio.to_thread(f.flush)
+                except OSError as exc:
+                    logger.error("Log write failed: %s", exc)
+                self.log_queue.task_done()
+        finally:
+            await asyncio.to_thread(f.close)
 
     async def _record(self, task: Task, decision: Decision, reason: str = "") -> None:
         entry = {
             "ts": time.time(),
             "task_id": task.id,
-            "payload_preview": task.payload[:50],
+            "payload_hash": hashlib.sha256(task.payload.encode()).hexdigest()[:16],
+            "payload_len": len(task.payload),
             "decision": decision.value,
             "reason": reason,
             "load": round(self.stats.current_load, 4),

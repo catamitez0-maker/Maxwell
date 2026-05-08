@@ -395,6 +395,13 @@ contract MaxwellSettlement is Ownable, ReentrancyGuard {
             s := mload(add(_signature, 64))
             v := byte(0, mload(add(_signature, 96)))
         }
-        return ecrecover(_ethSignedMessageHash, v, r, s);
+        // Normalize v: some libraries produce 0/1 instead of 27/28
+        if (v < 27) {
+            v += 27;
+        }
+        require(v == 27 || v == 28, "Invalid signature v value");
+        address signer = ecrecover(_ethSignedMessageHash, v, r, s);
+        require(signer != address(0), "Invalid signature: zero address recovered");
+        return signer;
     }
 }

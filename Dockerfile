@@ -14,11 +14,9 @@ RUN pip install --no-cache-dir --prefix=/install \
     "mmh3>=4.0.0" \
     "numpy>=1.24.0" \
     "aiohttp>=3.9.0" \
-    "fastapi>=0.100.0" \
-    "uvicorn>=0.23.0" \
-    "httpx>=0.25.0" \
     "web3>=6.0.0" \
-    "eth-account>=0.11.0"
+    "eth-account>=0.11.0" \
+    "kademlia>=2.2.2"
 
 COPY maxwell/ maxwell/
 COPY rules.json .

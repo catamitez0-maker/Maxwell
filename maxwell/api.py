@@ -3,22 +3,33 @@ HTTP API server for maxwell-proxy (aiohttp-based).
 
 Endpoints:
   POST /v1/proxy  — submit a task to the pruning funnel
-  GET  /healthz   — liveness / readiness probe
+  GET  /healthz   — liveness / readiness probe (public)
   GET  /v1/stats  — detailed funnel statistics
+  GET  /dashboard — web dashboard (public)
+  WS   /ws/stats  — real-time stats push (WebSocket)
+
+Settlement endpoints (registered when role=settlement):
+  POST /settle            — process a settlement transaction
+  GET  /balances/{addr}   — check address balance
+  GET  /ledger            — view mock ledger
 """
 
 from __future__ import annotations
 
 import asyncio
 import itertools
+import json as _json
 import logging
 import time
+import weakref
 
 import aiohttp
 from aiohttp import web
 
+from .auth import APIKeyStore, auth_middleware
 from .models import Task
 from .proxy import PruningProxy
+from .settlement import SettlementHandler, Web3Relayer
 
 __all__ = ["MaxwellServer"]
 
@@ -40,11 +51,15 @@ class MaxwellServer:
         host: str = "0.0.0.0",
         port: int = 8080,
         queue_timeout: float = 2.0,
+        api_key_store: APIKeyStore | None = None,
+        settlement_handler: SettlementHandler | None = None,
     ) -> None:
         self.proxy = proxy
         self.host = host
         self.port = port
         self.queue_timeout = queue_timeout
+        self.api_key_store = api_key_store
+        self.settlement_handler = settlement_handler
         self._runner: web.AppRunner | None = None
 
     async def handle_proxy(self, request: web.Request) -> web.StreamResponse | web.Response:
@@ -170,12 +185,95 @@ class MaxwellServer:
             content = f.read()
         return web.Response(text=content, content_type="text/html")
 
+    async def handle_ws_stats(self, request: web.Request) -> web.WebSocketResponse:
+        """WebSocket endpoint for real-time stats push (1Hz)."""
+        ws = web.WebSocketResponse(heartbeat=30)
+        await ws.prepare(request)
+        self._ws_clients.add(ws)
+        logger.info("Dashboard WS client connected (%d total)", len(self._ws_clients))
+
+        try:
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.ERROR:
+                    break
+        finally:
+            self._ws_clients.discard(ws)
+            logger.info("Dashboard WS client disconnected (%d remaining)", len(self._ws_clients))
+        return ws
+
+    async def _stats_broadcaster(self) -> None:
+        """Background task: push stats to all WS clients at 1Hz."""
+        while True:
+            await asyncio.sleep(1.0)
+            if not self._ws_clients:
+                continue
+            stats = self.proxy.stats
+            payload = _json.dumps({
+                "total_requests": stats.total_requests,
+                "qps": round(stats.qps, 2),
+                "pruning_rate": round(stats.pruning_rate, 2),
+                "layers": {
+                    "L1_bloom_blocked": stats.bloom_blocked,
+                    "L2_regex_blocked": stats.regex_blocked,
+                    "L3_entropy_blocked": stats.entropy_blocked,
+                    "L4_oracle_blocked": stats.oracle_blocked,
+                    "L5_repetition_blocked": stats.repetition_blocked,
+                    "circuit_blocked": stats.circuit_blocked,
+                },
+                "oracle": {
+                    "total_flops_metered": stats.total_flops_estimated,
+                    "flops_display": stats.flops_display,
+                    "model_name": self.proxy.model.name,
+                    "active_params": self.proxy.model.active_params,
+                },
+                "passed_to_engine": stats.passed_to_engine,
+                "active_streams": stats.active_streams,
+                "current_load": round(stats.current_load, 4),
+                "circuit_breaker": "OPEN" if stats.is_circuit_open else "CLOSED",
+                "entropy_thresholds": {
+                    "low": stats.entropy_low,
+                    "high": stats.entropy_high,
+                },
+                "uptime": round(stats.uptime, 1),
+                "p2p": {
+                    "role": self.proxy.role,
+                    "providers_count": len(self.proxy.p2p_manager.protocol.providers) if self.proxy.p2p_manager else 0,
+                }
+            })
+            dead: list[web.WebSocketResponse] = []
+            for client in self._ws_clients:
+                try:
+                    await client.send_str(payload)
+                except Exception:
+                    dead.append(client)
+            for d in dead:
+                self._ws_clients.discard(d)
+
     async def start(self) -> None:
-        app = web.Application()
+        middlewares = [auth_middleware]
+
+        app = web.Application(middlewares=middlewares)
+
+        # Attach key store for the middleware to use
+        if self.api_key_store:
+            app["api_key_store"] = self.api_key_store
+
+        # Core routes
         app.router.add_post("/v1/proxy", self.handle_proxy)
         app.router.add_get("/healthz", self.handle_health)
         app.router.add_get("/v1/stats", self.handle_stats)
         app.router.add_get("/dashboard", self.handle_dashboard)
+        app.router.add_get("/ws/stats", self.handle_ws_stats)
+
+        # Settlement routes (when handler is provided)
+        if self.settlement_handler:
+            self.settlement_handler.register_routes(app)
+            logger.info("Settlement routes registered")
+
+        # Start WebSocket broadcaster
+        self._ws_clients: set[web.WebSocketResponse] = set()
+        asyncio.create_task(self._stats_broadcaster())
+
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)

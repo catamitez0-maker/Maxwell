@@ -60,8 +60,9 @@ class BloomFilter:
         return max(1, int(k))
 
     def _hashes(self, item: str) -> list[int]:
-        return [mmh3.hash(item, seed, signed=False) % self.size
-                for seed in range(self.hash_count)]
+        h1 = mmh3.hash(item, 0, signed=False)
+        h2 = mmh3.hash(item, 1, signed=False)
+        return [(h1 + i * h2) % self.size for i in range(self.hash_count)]
 
     def add(self, item: str) -> None:
         """Insert an item into the filter."""
@@ -88,12 +89,19 @@ class BloomFilter:
 
 def shannon_entropy(text: str) -> float:
     """
-    Calculate Shannon information entropy using numpy vectorized ops.
+    Calculate Shannon information entropy.
+
+    Uses a pure-Python fast path for short text (<256 chars) to avoid
+    numpy overhead, and numpy vectorized ops for longer text.
 
     Returns bits-per-character.
     """
     if not text:
         return 0.0
+    n = len(text)
+    if n < 256:
+        freq = Counter(text)
+        return -sum((c / n) * math.log2(c / n) for c in freq.values())
     codes = np.frombuffer(text.encode("utf-8"), dtype=np.uint8)
     _, counts = np.unique(codes, return_counts=True)
     probabilities = counts / counts.sum()
